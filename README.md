@@ -8,6 +8,8 @@ MoveIt 2 提供标准位置轨迹规划，MuJoCo 提供动力学仿真。
 已完成高刚度跟踪、两档重力补偿、短时低刚度保持和归中失能的基础验收。负载变化、全工作区精度和长期低刚度表现仍待系统评估。
 v1.1.1 支持同帧发送位置、速度、任务前馈以及按关节覆盖重力和摩擦补偿。网页分别显示两类补偿的实时来源。网页与重力补偿启动脚本默认保持高刚度，可在启动时显式开启切换。SDK、HTTP 网关和七轴增量脚本可在上层用实测位置计算绝对目标。见 [扩展验收](validation/target-web.md#b601_experiments-扩展验收) 和 [发布记录](CHANGELOG.md)。
 
+当前工作区可为各 MIT 发令端单独配置外部重力 API。默认使用原生内部补偿。 [启动参数](#在上层启动时选择重力来源) · [MuJoCo 复测](validation/target-web.md#上层重力-api-复测)
+
 ## 演示
 
 框架支持电机侧 MIT 重力补偿与变刚度控制。网页可渲染 B601-DM 官方三维模型、连接 MuJoCo 或实机并发送关节目标。
@@ -21,6 +23,7 @@ v1.1.1 支持同帧发送位置、速度、任务前馈以及按关节覆盖重�
 |---|---|
 | 只看网页与官方三维模型 | `./scripts/start_target_web.sh`，打开 [本地控制台](http://127.0.0.1:8765/) |
 | 演练网页发令与归中 | 在网页手动连接 MuJoCo，发送目标后归中、Disable |
+| 对比内置重力与高斯模型 | 按各自的启动参数打开 Web，再连接 MuJoCo 物理场景。 [启动命令](#在上层启动时选择重力来源) |
 | 跑标准位置与 MoveIt 轨迹 | 加载当前工作区后运行 `ros2 launch b601_moveit_config demo.launch.py hardware:=mock` |
 | 控制真机 | 现场确认后，在网页连接「实机」或在终端运行 [MIT 重力补偿脚本](#快速启动重力补偿)，按所选入口归中并失能 |
 | 接入程序或策略 | 用 [TargetClient 或原生 ROS 2](#ros-2-接口) 申请整机控制权并发送六轴与夹爪目标 |
@@ -180,7 +183,7 @@ ros2 service call /b601_mit_recenter/recenter std_srvs/srv/Trigger '{}'
 
 `mit_gravity_compensation` 默认关闭，使用纯 PD。启用软硬刚度切换时从高刚度起步，首个目标完成且六轴连续到位 3 秒后降档，收到新目标再升档。每轴按相邻目标位移的 5% 计算到位误差带，上限为 0.05 rad。重力补偿档的下限为 J3 0.03 rad、J4 和 J5 0.02 rad、其余轴 0.01 rad。纯 PD 的六轴下限均为 0.01 rad。低档逐周期采用实测位置作为位置参考。重力补偿配置的两档共用实机辨识重力模型，高档沿用 J2–J5 的前馈比例，低档保留全轴重力比例。低档默认使用高档的 50% Kp 和 20% Kd。
 
-每次启动可用 `mit_stiffness_switching:=true` 开启软硬刚度切换，或用 `mit_stiffness_switching:=false` 保持高刚度。`auto` 沿用所选控制器配置。启动日志显示实际选择；重力补偿仍由后端和 `mit_gravity_compensation` 决定。
+每次启动可用 `mit_stiffness_switching:=true` 开启软硬刚度切换，或用 `mit_stiffness_switching:=false` 保持高刚度。`auto` 沿用所选控制器配置。启动日志显示实际选择。内置重力补偿由后端和 `mit_gravity_compensation` 配置，上层可独立选择外部重力 API。 [上层来源选择](#在上层启动时选择重力来源)
 
 ### 快速启动重力补偿
 
@@ -421,6 +424,37 @@ dispatch_id = client.set_joints(positions, 3.0, gravity_ff=gravity_ff)
 `/b601_mit_arm/ff` 和 `/b601_mit_gripper/ff` 按摩擦、重力、任务三段回读实际采用的值。两条原生 ROS 2 旧入口 `/target` 与 `/set_target` 仍支持位置、速度和任务前馈。
 
 各控制器的 `~/compensation_sources` 按关节回读实际选用的来源。HTTP `/api/state` 的 `compensation_sources` 提供 `gravity` 和 `friction` 两个关节字典，取值为 `internal` 或 `external`。等待可用回读时返回 `null`。
+
+#### 在上层启动时选择重力来源
+
+`gravity_source:=internal` 或省略参数时，普通目标使用控制器原生重力。选择 `external` 时必须通过 `gravity_api` 指定可导入的 Python 工厂，格式为 `module:factory`。工厂无参，返回对象须提供 `gravity_ff(measured_positions)`，输入是七个实测关节位置的字典，输出是按关节名索引的完整保持力矩或力。API 源码目录可以通过 `PYTHONPATH` 提供。高斯 API 默认返回 J2–J5。
+
+从实验工作区启动独立 Web。使用内置补偿时可省略 `gravity_source`。
+
+```bash
+./scripts/start_target_web.sh gravity_source:=internal
+```
+
+使用同级 `gravity_identification` 目录中的高斯 API 时，执行以下命令。
+
+```bash
+PYTHONPATH="$(realpath ../gravity_identification)${PYTHONPATH:+:$PYTHONPATH}" \
+  ./scripts/start_target_web.sh gravity_source:=external \
+  gravity_api:=neural_network.feedforward:GaussianFeedforward.load
+```
+
+切换来源时，先按当前后端的归中和停机流程结束已有控制台。也可指定独立端口与空闲 ROS 域测试。独立控制台只启动网页和模型预览，需在网页中连接后端。网页和归中分别选择来源。
+
+| 入口 | 启动选项 |
+|---|---|
+| 独立 Web | `gravity_source`、`gravity_api` |
+| `bringup.launch.py` 中启用的 Web | `target_web_gravity_source`、`target_web_gravity_api` |
+| `bringup.launch.py` 中的 MIT 归中 | `mit_recenter_gravity_source`、`mit_recenter_gravity_api` |
+| `scripts/start_mit_gravity.sh` 中的 MIT 归中 | 环境变量 `MIT_RECENTER_GRAVITY_SOURCE`、`MIT_RECENTER_GRAVITY_API` |
+| 自有 Python ROS 2 节点 | `TargetClient(node, source, gravity_source="external", gravity_api="module:factory")`，或为该节点设置 ROS 参数 `gravity_source`、`gravity_api` |
+| 手动 ROS 2 发令工具 `scripts/dm_mit_move.py` | `--gravity-source external --gravity-api module:factory` |
+
+各入口独立选择来源。网页绝对目标和七轴增量都可用 Web 节点配置的 API。启动时加载外部工厂，模型文件或 API 加载失败会报告错误。运行时随发令用新鲜实测姿态求值。反馈不可用或模型结果无效时，目标沿用控制器内部补偿。既有的显式 `gravity_ff` 字段仍由该帧发令方决定，优先于自动计算。单次点发的 `gravity_ff` 依旧随原有目标帧超时。HTTP `/api/state` 的 `gravity_source` 与 `gravity_api` 是网页节点的启动配置，`compensation_sources` 是控制器的实际回读。
 
 ### 客户端示例
 

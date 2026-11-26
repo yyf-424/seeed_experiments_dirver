@@ -1,5 +1,10 @@
 # 发布记录
 
+## 未发布
+
+- Web、Python `TargetClient`、手动 MIT 工具和 MIT 归中可在启动时独立选择 `internal` 或 `external`。外部模式加载由 `gravity_api` 指定的 Python 工厂，按实测姿态计算并随目标提交前馈。Web 的 `/api/state` 分别回读启动选择和控制器实际采用的来源。 [操作说明](README.md#在上层启动时选择重力来源)
+- 实际高斯模型通过 Web 和 SDK 组帧检查。物理 MuJoCo 中，Web 发令获得手臂及夹爪采纳回执，J2–J5 重力回读与目标帧一致。 [验收与复测](validation/target-web.md#上层重力-api-复测)
+
 ## v1.1.1 · 外部补偿与相对关节目标 · 2026-11-26
 
 - Python SDK 与 HTTP 网关接受按关节名指定的增量，基于上层实测反馈换算，再向仲裁发送七关节绝对目标。 [相对目标接口](README.md#相对关节目标)

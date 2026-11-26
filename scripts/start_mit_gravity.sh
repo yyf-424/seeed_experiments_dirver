@@ -8,6 +8,8 @@ HARDWARE=dm                     # dm 或 mujoco。重力补偿支持这两个后
 DM_COMMAND_MODE=mit_impedance
 MIT_GRAVITY_COMPENSATION=true
 MIT_STIFFNESS_SWITCHING=false  # true 开启软硬切换，false 保持高刚度，auto 沿用预设。
+MIT_RECENTER_GRAVITY_SOURCE="${MIT_RECENTER_GRAVITY_SOURCE:-internal}"
+MIT_RECENTER_GRAVITY_API="${MIT_RECENTER_GRAVITY_API:-}"  # external 时使用 module:factory。
 DM_ENABLE_MOTORS=true          # 真机 true 会使能并自动归中。现场确认后再启动。
 USE_SAFETY=true
 USE_RVIZ=false
@@ -27,6 +29,8 @@ exec ros2 launch b601_bringup bringup.launch.py \
   "dm_command_mode:=$DM_COMMAND_MODE" \
   "mit_gravity_compensation:=$MIT_GRAVITY_COMPENSATION" \
   "mit_stiffness_switching:=$MIT_STIFFNESS_SWITCHING" \
+  "mit_recenter_gravity_source:=$MIT_RECENTER_GRAVITY_SOURCE" \
+  "mit_recenter_gravity_api:=$MIT_RECENTER_GRAVITY_API" \
   "dm_enable_motors:=$DM_ENABLE_MOTORS" \
   "use_safety:=$USE_SAFETY" \
   "use_rviz:=$USE_RVIZ"

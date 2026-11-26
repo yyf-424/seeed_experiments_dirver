@@ -66,9 +66,10 @@ def load_limits():
 class MitMover(Node):
     def __init__(self, rate_hz: float,
                  tolerance: float, debug_topic: str,
-                 settle: float = SETTINGS["settle"]):
+                 settle: float = SETTINGS["settle"], *, gravity_source=None, gravity_api=None):
         super().__init__("b601_mit_move")
-        self.targets = TargetClient(self, "manual")
+        self.targets = TargetClient(
+            self, "manual", gravity_source=gravity_source, gravity_api=gravity_api)
         self.current: dict[str, float] = {}
         self.current_vel: dict[str, float] = {}
         self.safety = "UNKNOWN"
@@ -252,6 +253,8 @@ def main() -> int:
     ap.add_argument("--poses", default="", help="多个姿态用 ; 分隔，依次执行")
     ap.add_argument("--vel", default="", help="目标速度，例如 joint1=0.05（rad/s，夹爪 m/s）")
     ap.add_argument("--tff", default="", help="任务前馈，例如 joint1=0.2（N·m，夹爪 N）")
+    ap.add_argument("--gravity-source", choices=("internal", "external"), default="internal")
+    ap.add_argument("--gravity-api", default="", help="外部 Python API 位置，格式 module:factory")
     ap.add_argument("--rate", type=float, default=SETTINGS["rate"], help="目标发布频率 Hz")
     ap.add_argument("--tolerance", type=float, default=SETTINGS["tolerance"],
                     help="到位判据 rad（只用于判到位，不会让目标跳步；纯 MIT 有下垂，别设太小）")
@@ -274,7 +277,12 @@ def main() -> int:
 
     rclpy.init()
     debug_topic = args.debug_topic or f"/{args.controller}/debug"
-    node = MitMover(args.rate, args.tolerance, debug_topic, args.settle)
+    try:
+        node = MitMover(args.rate, args.tolerance, debug_topic, args.settle,
+                        gravity_source=args.gravity_source, gravity_api=args.gravity_api)
+    except ValueError as error:
+        rclpy.try_shutdown()
+        ap.error(str(error))
     try:
         if not node.wait_ready():
             node.get_logger().error("等不到 /joint_states 或 /b601_safety/status（bringup 起来了吗？）")

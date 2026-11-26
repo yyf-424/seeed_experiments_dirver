@@ -14,12 +14,14 @@ from b601_description.project_config import load_project_config
 from b601_target_interfaces.msg import MitTargetFrame, TargetFrame
 from b601_target_interfaces.srv import ReleaseSource, RenewSource, SelectSource, SetMitTarget, SetTarget
 
+from .gravity_provider import GravityProvider
 from .mit_target import make_mit_target, positions_from_deltas
 from .target_arbiter import ARBITER
 
 
 class TargetClient:
-    def __init__(self, node, source, *, callback_group=None, auto_renew=True):
+    def __init__(self, node, source, *, callback_group=None, auto_renew=True,
+                 gravity_source=None, gravity_api=None):
         self.node = node
         self.source = source
         self.session_id = ""
@@ -31,6 +33,8 @@ class TargetClient:
         self.joints = (*robot["arm_joints"], robot["gripper_joint"])
         self.limits = project["joints"]
         self.feedback_timeout = project["safety"]["feedback_timeout_sec"]
+        self.gravity = GravityProvider(
+            node, self.joints, self.feedback_timeout, source=gravity_source, api=gravity_api)
         self.feedback = {}
         self.feedback_at = -float("inf")
         self.positions = {}
@@ -111,7 +115,10 @@ class TargetClient:
             raise RuntimeError(reply.message)
 
     def frame(self, target, *, gravity_ff=None, friction_ff=None):
-        command = make_mit_target(target, gravity_ff, friction_ff)
+        with self.lock:
+            feedback = self.feedback, self.feedback_at
+        gravity = self.gravity.resolve(gravity_ff, feedback)
+        command = make_mit_target(target, gravity, friction_ff)
         with self.lock:
             if not self.session_id:
                 raise RuntimeError("select the target source before publishing")

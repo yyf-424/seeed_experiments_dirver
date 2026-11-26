@@ -27,6 +27,7 @@ from b601_target_interfaces.srv import (
 from .mit_recenter import RECENTER_SERVICE
 from .mit_recenter_client import recenter_result_timeout
 from .mit_target import make_mit_target, positions_from_deltas
+from .gravity_provider import GravityProvider
 from .target_arbiter import ARBITER
 from .web_backend import WebBackend
 from .web_robot_model import build_model, find_vendor_model
@@ -51,6 +52,7 @@ class TargetWeb(Node):
                        for joint, bounds in config["joints"].items()}
         robot = config["robot"]
         self.joints = (*robot["arm_joints"], robot["gripper_joint"])
+        self.gravity = GravityProvider(self, self.joints, self.feedback_timeout)
         self.compensation_samples = {}
         self.status = None
         self.feedback_sample = ({}, None)
@@ -157,6 +159,8 @@ class TargetWeb(Node):
             "status": status,
             "backend": backend,
             "stiffness": stiffness,
+            "gravity_source": self.gravity.source,
+            "gravity_api": self.gravity.api,
             "compensation_sources": self.compensation_sources(now) if connected else None,
             "recenter_ready": self.recenter.service_is_ready(),
             "feedback": {} if show_preview else feedback,
@@ -191,18 +195,29 @@ class TargetWeb(Node):
         elif path == "/api/revoke":
             request = RevokeSource.Request(session=data["session"])
             client = self.revoke
-        elif path == "/api/target":
-            positions = data["positions"]
-            if not isinstance(positions, dict):
-                raise ValueError("positions must be an object keyed by joint name")
+        elif path in ("/api/target", "/api/delta_target"):
+            feedback = self.feedback_sample
+            if path == "/api/delta_target":
+                try:
+                    positions = positions_from_deltas(
+                        self.joints, data["deltas"], feedback, self.feedback_timeout)
+                except RuntimeError as error:
+                    return HTTPStatus.SERVICE_UNAVAILABLE, {"message": str(error)}
+            else:
+                positions = data["positions"]
+                if not isinstance(positions, dict):
+                    raise ValueError("positions must be an object keyed by joint name")
             target = JointState(name=list(positions), position=[float(v) for v in positions.values()])
             for key, field in (("velocities", "velocity"), ("tff", "effort")):
-                values = data.get(key, {})
+                values = data.get(key, {}) if path == "/api/target" else {}
                 if not isinstance(values, dict) or not values.keys() <= positions.keys():
                     raise ValueError(f"{key} must be an object keyed by joint name")
                 if values:
                     setattr(target, field, [float(values.get(name, 0.0)) for name in target.name])
-            command = make_mit_target(target, data.get("gravity_ff"), data.get("friction_ff"))
+            gravity = self.gravity.resolve(
+                data.get("gravity_ff") if path == "/api/target" else None, feedback)
+            friction = data.get("friction_ff") if path == "/api/target" else None
+            command = make_mit_target(target, gravity, friction)
             frame = {"session_id": data["session_id"], "sequence": data["sequence"]}
             if command.gravity_ff or command.friction_ff:
                 request = SetMitTarget.Request(frame=MitTargetFrame(command=command, **frame))
@@ -210,16 +225,6 @@ class TargetWeb(Node):
             else:
                 request = SetTarget.Request(frame=TargetFrame(target=target, **frame))
                 client = self.set_target
-        elif path == "/api/delta_target":
-            try:
-                positions = positions_from_deltas(
-                    self.joints, data["deltas"], self.feedback_sample, self.feedback_timeout)
-            except RuntimeError as error:
-                return HTTPStatus.SERVICE_UNAVAILABLE, {"message": str(error)}
-            target = JointState(name=list(positions), position=list(positions.values()))
-            request = SetTarget.Request(frame=TargetFrame(
-                session_id=data["session_id"], sequence=data["sequence"], target=target))
-            client = self.set_target
         else:
             raise KeyError("unknown endpoint")
 

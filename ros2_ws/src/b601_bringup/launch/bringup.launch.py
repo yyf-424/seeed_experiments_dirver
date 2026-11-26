@@ -288,6 +288,10 @@ def generate_launch_description():
                 parameters=[{
                     "project_config_file": project_config_file,
                     "port": ParameterValue(target_web_port, value_type=int),
+                    "gravity_source": ParameterValue(
+                        LaunchConfiguration("target_web_gravity_source"), value_type=str),
+                    "gravity_api": ParameterValue(
+                        LaunchConfiguration("target_web_gravity_api"), value_type=str),
                     "attached_backend": ParameterValue(hardware, value_type=str),
                     "attached_mujoco_scene": ParameterValue(
                         LaunchConfiguration("attached_mujoco_scene", default=""), value_type=str),
@@ -314,7 +318,11 @@ def generate_launch_description():
             and {"joint_state_broadcaster", "b601_mit_arm"}.issubset(names)
         )
         parameters = {"project_config_file": project_config_file,
-                      "recenter_on_startup": recenter_on_startup}
+                      "recenter_on_startup": recenter_on_startup,
+                      "gravity_source": ParameterValue(
+                          LaunchConfiguration("mit_recenter_gravity_source"), value_type=str),
+                      "gravity_api": ParameterValue(
+                          LaunchConfiguration("mit_recenter_gravity_api"), value_type=str)}
         collision_override = mit_recenter_check_collisions.perform(context)
         if collision_override:
             parameters["check_collisions"] = IfCondition(mit_recenter_check_collisions).evaluate(context)
@@ -354,6 +362,14 @@ def generate_launch_description():
                 "target_web_port", default_value="8765",
                 description="浏览器目标入口的本地 HTTP 端口",
             ),
+            DeclareLaunchArgument(
+                "target_web_gravity_source", default_value="internal", choices=["internal", "external"],
+            ),
+            DeclareLaunchArgument("target_web_gravity_api", default_value=""),
+            DeclareLaunchArgument(
+                "mit_recenter_gravity_source", default_value="internal", choices=["internal", "external"],
+            ),
+            DeclareLaunchArgument("mit_recenter_gravity_api", default_value=""),
             DeclareLaunchArgument(
                 "hardware", default_value=str(cfg["hardware"].get("default_backend", "mock")),
                 description="硬件后端：mock（默认，无实物）| dm（真机）| mujoco（动力学仿真）",

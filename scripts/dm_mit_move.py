@@ -253,7 +253,7 @@ def main() -> int:
     ap.add_argument("--poses", default="", help="多个姿态用 ; 分隔，依次执行")
     ap.add_argument("--vel", default="", help="目标速度，例如 joint1=0.05（rad/s，夹爪 m/s）")
     ap.add_argument("--tff", default="", help="任务前馈，例如 joint1=0.2（N·m，夹爪 N）")
-    ap.add_argument("--gravity-source", choices=("internal", "external"), default="internal")
+    ap.add_argument("--gravity-source", choices=("internal", "external"))
     ap.add_argument("--gravity-api", default="", help="外部 Python API 位置，格式 module:factory")
     ap.add_argument("--rate", type=float, default=SETTINGS["rate"], help="目标发布频率 Hz")
     ap.add_argument("--tolerance", type=float, default=SETTINGS["tolerance"],

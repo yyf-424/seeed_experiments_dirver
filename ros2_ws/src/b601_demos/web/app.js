@@ -11,6 +11,15 @@ const connectButton = element("connect");
 const disableButton = element("disable");
 const recenterButton = element("recenter");
 const stiffnessLabels = { high: "高刚度", low: "低刚度" };
+const loadSites = new Map([["gripper", "夹爪"], ["upper_arm", "大臂"], ["forearm", "小臂"], ["wrist", "腕部"]]);
+const loadStatuses = new Map([
+  ["waiting_node", "等待负载节点"], ["waiting_description", "等待后端模型"],
+  ["waiting_feedback", "等待关节反馈"], ["invalid_feedback", "关节反馈不完整"],
+  ["uncalibrated", "待空载清零"], ["taring", "正在空载清零"], ["warming_up", "正在采样"],
+  ["no_contact", "未检测到外力"], ["ambiguous", "力方向或作用点不确定"],
+  ["residual_only", "残差无法拟合所选作用点"], ["unresolved", "作用点未辨识"],
+  ["provider_error", "负载 API 不可用"], ["unsupported_backend", "当前后端无适用的估计器"],
+]);
 const sourceLabels = new Map([
   ["web", "网页"], ["policy", "外部策略"], ["external", "外部接口"], ["recenter", "归中"],
 ]);
@@ -24,6 +33,7 @@ let snapshot = { feedback: {}, limits: {} };
 let busy = false;
 let recenterPending = false;
 let robotView;
+let displayedLoad;
 
 function sourceLabel(source) {
   return sourceLabels.get(source) || source || "无";
@@ -47,7 +57,7 @@ function refreshRobotView() {
   robotView.update({
     feedback: snapshot.feedback, target, label, online: !!snapshot.status,
     armJoints: state?.joints, limits: snapshot.limits,
-    previewPose: snapshot.preview_pose, modelRevision: snapshot.model_revision,
+    previewPose: snapshot.preview_pose, modelRevision: snapshot.model_revision, load: snapshot.load,
   });
 }
 
@@ -134,26 +144,78 @@ function makeRows(names) {
   }
 }
 
+function showLoadFeedback() {
+  const load = snapshot.load;
+  const list = element("load-readings");
+  const positions = load?.positions ?? [];
+  element("load-feedback").hidden = !positions.length;
+  if (!positions.length) return;
+  element("load-frame").textContent = load.frame_id;
+  const rows = positions.map((name) => {
+    const reading = load.estimates[name];
+    const status = loadStatuses.get(reading?.status) || "等待估计";
+    const magnitude = reading?.magnitude_n;
+    const detail = reading?.direction
+      ? reading.force_n.map((value, index) =>
+        `${"XYZ"[index]} ${value >= 0 ? "+" : ""}${value.toFixed(2)}`).join("  ")
+      : status;
+    const value = magnitude == null ? detail : `${magnitude.toFixed(2)} N · ${detail}`;
+    return `${loadSites.get(name) || name}  ${value}`;
+  });
+  const key = rows.join("\n");
+  if (key === displayedLoad) return;
+  displayedLoad = key;
+  list.replaceChildren(...rows.map((text) => {
+    const item = document.createElement("li");
+    item.textContent = text;
+    return item;
+  }));
+}
+
 function showCompensationSource(kind) {
   const output = element(`${kind}-source`);
   const byJoint = snapshot.compensation_sources?.[kind];
   const joints = Object.keys(byJoint || {});
+  const axes = (names) => names.map(
+    (name) => name === "finger_left" ? "夹爪" : name.replace(/^joint(\d+)$/, "J$1")).join("、");
   const external = joints.filter((name) => byJoint[name] === "external");
+  const disabled = joints.filter((name) => byJoint[name] === "disabled");
   let source = "unknown";
   let label = "待回读";
-  if (joints.length && external.length === joints.length) {
+  if (joints.length && disabled.length === joints.length) {
+    source = "disabled";
+    label = "已关闭";
+  } else if (joints.length && external.length === joints.length) {
     source = "external";
     label = "外部传入";
   } else if (external.length) {
     source = "mixed";
-    const axes = external.map((name) => name === "finger_left" ? "夹爪" : name.replace(/^joint(\d+)$/, "J$1"));
-    label = `混合 · 外部 ${axes.join("、")}`;
+    label = `混合 · 外部 ${axes(external)}`;
   } else if (joints.length) {
     source = "internal";
     label = "内部数据";
   }
+  if (disabled.length && source !== "disabled") label += ` · 关闭 ${axes(disabled)}`;
   output.dataset.source = source;
   if (output.textContent !== label) output.textContent = label;
+}
+
+function refreshGravity() {
+  const choice = snapshot.gravity_selection;
+  for (const source of ["internal", "external"]) {
+    const button = element(`gravity-${source}`);
+    button.disabled = busy || !choice || (source === "external" && !choice.api);
+    button.setAttribute("aria-pressed", String(choice?.selected === source));
+  }
+  const status = element("gravity-selection");
+  const pendingSource = choice?.requested === "external" ? "外部" : "内部";
+  const detail = choice?.error || (choice?.pending ? `等待${pendingSource}重力补偿` : "");
+  const sources = Object.values(snapshot.compensation_sources?.gravity || {}).filter((source) => source !== "disabled");
+  const fallback = sources.length > 0 && sources.every((source) => source === "internal");
+  const interruption = fallback ? "外部更新中断，已回到内部" : "外部重力流停更";
+  const text = choice?.stale ? [interruption, detail].filter(Boolean).join(" · ") : detail;
+  status.dataset.error = String(Boolean(choice?.error || choice?.stale));
+  if (status.textContent !== text) status.textContent = text;
 }
 
 function refreshBackend() {
@@ -190,6 +252,7 @@ function refreshBackend() {
     stiffness.dataset.mode = mode;
     stiffness.textContent = stiffnessLabels[mode] || "刚度待回读";
   }
+  refreshGravity();
   showCompensationSource("gravity");
   showCompensationSource("friction");
 }
@@ -231,6 +294,7 @@ function refresh() {
       setValue(row, desired ?? value);
     }
   }
+  showLoadFeedback();
   refreshRobotView();
 }
 
@@ -251,6 +315,8 @@ async function poll() {
     snapshot.backend = null;
     snapshot.stiffness = null;
     snapshot.compensation_sources = null;
+    snapshot.gravity_selection = null;
+    if (snapshot.load) snapshot.load = { ...snapshot.load, estimates: {} };
     refresh();
     notice(error.message, true);
   } finally {
@@ -354,6 +420,13 @@ connectButton.addEventListener("click", () => mutate(() => {
   return changeBackend("/api/connect", payload);
 }));
 disableButton.addEventListener("click", () => mutate(() => changeBackend("/api/disable", {})));
+
+for (const source of ["internal", "external"]) {
+  element(`gravity-${source}`).addEventListener("click", () => mutate(async () => {
+    const reply = await api("/api/gravity_source", { source });
+    notice(reply.message);
+  }));
+}
 
 inputSource.addEventListener("input", refresh);
 element("acquire").addEventListener("click", () => mutate(async () => {

@@ -26,6 +26,13 @@
             <button id="reset-view" class="quiet" disabled>复位视角</button>
           </div>
         </div>
+        <section id="load-feedback" class="load-feedback" aria-labelledby="load-title" hidden>
+          <div class="load-heading">
+            <h3 id="load-title">外力估计</h3>
+            <span id="load-frame"></span>
+          </div>
+          <ul id="load-readings"></ul>
+        </section>
         <div id="robot-stage" class="robot-stage">
           <span id="model-status" class="model-status" role="status">等待后端发布机械臂模型</span>
           <button type="button" id="tcp-handle" class="tcp-handle" aria-label="TCP 末端目标"
@@ -68,6 +75,11 @@
             </select>
           </div>
           <p id="backend-feedback" class="backend-feedback" role="status"></p>
+          <div class="gravity-controls" role="group" aria-label="切换重力补偿">
+            <button id="gravity-internal" class="quiet" disabled>使用内部重力</button>
+            <button id="gravity-external" class="quiet" disabled>使用外部重力</button>
+            <span id="gravity-selection" role="status"></span>
+          </div>
           <dl class="compensation-sources">
             <div><dt>重力补偿来源</dt><dd><span id="gravity-source" role="status">待回读</span></dd></div>
             <div><dt>摩擦补偿来源</dt><dd><span id="friction-source" role="status">待回读</span></dd></div>

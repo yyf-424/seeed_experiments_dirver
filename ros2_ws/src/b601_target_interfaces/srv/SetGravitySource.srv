@@ -1,0 +1,5 @@
+# Nonempty efforts select external gravity. Empty efforts select internal.
+b601_target_interfaces/GravityCompensation command
+---
+bool accepted
+string message

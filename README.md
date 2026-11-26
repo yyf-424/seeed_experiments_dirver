@@ -8,7 +8,7 @@ MoveIt 2 提供标准位置轨迹规划，MuJoCo 提供动力学仿真。
 已完成高刚度跟踪、两档重力补偿、短时低刚度保持和归中失能的基础验收。负载变化、全工作区精度和长期低刚度表现仍待系统评估。
 v1.1.1 支持同帧发送位置、速度、任务前馈以及按关节覆盖重力和摩擦补偿。网页分别显示两类补偿的实时来源。网页与重力补偿启动脚本默认保持高刚度，可在启动时显式开启切换。SDK、HTTP 网关和七轴增量脚本可在上层用实测位置计算绝对目标。见 [扩展验收](validation/target-web.md#b601_experiments-扩展验收) 和 [发布记录](CHANGELOG.md)。
 
-当前工作区可为各 MIT 发令端单独配置外部重力 API。默认使用原生内部补偿。 [启动参数](#在上层启动时选择重力来源) · [MuJoCo 复测](validation/target-web.md#上层重力-api-复测)
+各 MIT 上层可显式选择重力来源。选中的外部 API 持续按实测姿态更新，网页支持手动切换。 [启动与切换](#在上层启动时选择重力来源) · [MuJoCo 复测](validation/target-web.md#持续重力补偿与手动切换)
 
 ## 演示
 
@@ -285,11 +285,11 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 ./scripts/start_target_web.sh
 ```
 
-打开 [本地目标控制台](http://127.0.0.1:8765/)，页面会默认加载随包安装的 B601-DM 官方 STL，显示默认姿态。脚本只启动网页和预览模型发布器，URDF 发布到 `/b601_preview/robot_description`，预览姿态来自项目配置。需要另一个端口时运行 `./scripts/start_target_web.sh port:=8766`。
+打开 [本地目标控制台](http://127.0.0.1:8765/)，页面会默认加载随包安装的 B601-DM 官方 STL，显示默认姿态。脚本启动网页、负载辨识节点和预览模型发布器，URDF 发布到 `/b601_preview/robot_description`，预览姿态来自项目配置。需要另一个端口时运行 `./scripts/start_target_web.sh port:=8766`。
 
 在网页选择 MuJoCo 或实机后，「软硬刚度切换」默认关闭。连接前可选开启或按后端默认。连接后状态栏显示实际使用的设置及当前刚度。可用 `./scripts/start_target_web.sh mit_stiffness_switching:=true` 将网页首次选择预设为开启。
 
-后端区域分别显示重力和摩擦补偿的实时来源。部分关节使用外部数据时显示「混合」并列出这些关节。外部值过期后，控制器回退内部计算，网页随回读更新。显式传入的零值仍标记为外部来源。
+后端区域分别显示重力和摩擦补偿的实时来源。部分关节使用外部数据时显示「混合」并列出这些关节。重力补偿开启时，持续更新的外部值生效，停更时回到内部。关闭时网页显示「已关闭」。摩擦覆盖沿用位置目标帧的时效。显式传入的零值仍标记为外部来源。
 
 重复运行会显示已有控制台的地址并返回终端。要退出控制台，在最初启动它的终端按 `Ctrl+C`。端口被其他服务占用时，启动命令会提示选择空闲端口。
 
@@ -314,6 +314,84 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 
 连接就绪后，可手动指定权威来源及发送目标。也可通过 `use_target_web:=true`
 随既有 MIT bringup 启动同一页面，此时页面显示该后端。
+
+#### 网页外力估计
+
+网页在机械臂视图上方显示外力大小（N）和 `base_link` 下的 X/Y/Z 分量。有效非零力用三维箭头标在对应作用点。
+
+##### 启动、清零与读取
+
+```bash
+./scripts/build.sh
+./scripts/start_target_web.sh load_positions:=gripper
+```
+
+脚本默认显式传入 `gripper`。独立节点 `b601_load` 通过 `load_identification` 的物理观察器估计施加在机械臂上的外力。脚本从当前检出目录向上寻找 `load_identification`，也可以用 `B601_LOAD_ROOT` 指定该仓库的路径。默认工厂需要该仓库及其 Python 依赖。
+
+打开 [本地控制台](http://127.0.0.1:8765/)，连接 MuJoCo，或按项目约定取得现场确认后连接实机。显示「待空载清零」时，在相同 ROS 域的另一个终端加载环境。在姿态稳定且无外加负载时调用清零服务。默认观察器采集约 1 秒空载反馈，每个刚度档独立保存参考。等网页显示「未检测到外力」后即可观察读数。
+
+```bash
+source scripts/ros_env.sh && b601_source_workspace
+ros2 service call /b601_load/tare std_srvs/srv/Trigger '{}'
+ros2 topic echo /b601_load/estimates --qos-reliability best_effort
+curl -s http://127.0.0.1:8765/api/load
+```
+
+| 状态 | 含义或处理方式 |
+|---|---|
+| `waiting_node` / `waiting_feedback` | 等待负载节点或关节反馈。核对后端是否已启动，以及两端的 ROS 域。 |
+| `uncalibrated` / `taring` | 当前刚度档需要空载清零，或正在采集空载参考。 |
+| `no_contact` | 估计器未检测到外力。大小为零，方向为空。 |
+| `estimated` | 读到有效力向量。 |
+| `ambiguous` / `residual_only` | 方向或作用点存在歧义，或所选作用点无法解释观测到的力矩残差。 |
+| `provider_error` | 检查 `load_api`、模块搜索路径和负载节点日志。 |
+
+已有 MIT bringup 通过 `use_target_web:=true` 启动网页时，可在同一 ROS 域独立启动估计节点。以下命令从实验 worktree 的另一个终端运行，将路径替换为本机的 `load_identification` 检出目录。
+
+```bash
+source scripts/ros_env.sh && b601_source_workspace
+B601_LOAD_ROOT=/path/to/seeed/load_identification
+PYTHONPATH="$B601_LOAD_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  ros2 run b601_demos load_node --ros-args -p load_positions:=gripper
+```
+
+##### 位置与参考系
+
+启动时按逗号列出位置，例如 `load_positions:=upper_arm,forearm,wrist,gripper`。作用点取自现有辨识候选点，以下坐标单位为米。
+
+| 位置参数 | 作用点参考系 | XYZ |
+|---|---|---|
+| `upper_arm`（大臂） | `link2` | `[-0.135, 0.035, -0.030]` |
+| `forearm`（小臂） | `link3` | `[0.120, -0.045, -0.030]` |
+| `wrist`（腕部） | `link4` | `[0.068, -0.060, -0.030]` |
+| `gripper`（夹爪） | `end_link` | `[-0.090, 0.033, 0.025]` |
+
+ROS 2 消息 `b601_target_interfaces/msg/LoadEstimates` 用测量时间和 `header.frame_id=base_link` 标记所有力向量。每个作用点有自己的连杆坐标系和 `force_valid`。HTTP `GET /api/load` 与 `GET /api/state` 的 `load` 字段提供相同结构，包含 `stamp_ns`（纳秒字符串）、`frame_id` 和按位置索引的 `estimates`。有效读数包括 `force_n`、`magnitude_n` 与单位方向 `direction`，零力无方向。待清零、方向不可观测、候选点歧义或断流时，力向量、大小和方向均为 `null`。断流后 `stamp_ns` 也为 `null`。
+
+以下为 `GET /api/load` 的夹爪合成外力示例。
+
+```json
+{
+  "frame_id": "base_link",
+  "stamp_ns": "1795706025768619388",
+  "api": "b601_demos.contact_load_provider:create_provider",
+  "positions": ["gripper"],
+  "estimates": {
+    "gripper": {
+      "status": "estimated",
+      "link": "end_link",
+      "point_xyz_m": [-0.09, 0.033, 0.025],
+      "force_n": [4.0, -6.0, -8.0],
+      "magnitude_n": 10.7703,
+      "direction": [0.3714, -0.5571, -0.7428]
+    }
+  }
+}
+```
+
+##### 替换辨识 API
+
+通过 `load_api:=module:factory` 替换默认工厂，在 `PYTHONPATH` 中提供对应模块。工厂接收 `dict[str, LoadSite]`，返回对象提供 `estimate(feedback, robot_description)`。参数是 `DynamicJointState` 与后端 URDF 文本（首次收到前为 `None`），返回按位置索引的 `LoadReading(status, force_n)`。力向量使用 `base_link` 的 XYZ，单位 N，符号为施加在机械臂上的力。可选方法 `tare()` 开始空载清零并返回提示字符串。类型定义位于 `b601_demos.load_api`。框架允许各点分别报告读数。默认观察器按单一外力假设辨识候选点，多个候选点或方向无法区分时报告不确定。实机测力精度待现场核对。 [网页负载估计复测](validation/target-web.md#网页负载估计复测)
 
 ### MuJoCo 网页回归夹具
 
@@ -406,7 +484,7 @@ HTTP `POST /api/delta_target` 接收 `session_id`、递增的 `sequence` 和按�
 
 ### 外部重力与摩擦前馈
 
-`gravity_ff` 和 `friction_ff` 各自接受按关节名索引的最终补偿量，手臂用 N·m，主动夹爪用 N。每个关节分别选择外部重力、摩擦或对应的内部项，再加 `tff`。显式传 `0.0` 会把该项设为零。省略字段或关节时立即使用内部项。停止发送目标后，覆盖与 `tff` 共用现有的 `task_torque_timeout_sec`，默认 0.5 秒。持续计算时应按新鲜实测位姿更新前馈，随目标帧发送。缩放、偏置及内部摩擦模型参数作用于回退使用的内部项。
+`gravity_ff` 和 `friction_ff` 各自接受按关节名索引的最终补偿量，手臂用 N·m，主动夹爪用 N。每个关节分别选择外部重力、摩擦或对应的内部项，再加 `tff`。显式传 `0.0` 会把该项设为零。位置帧中的 `gravity_ff` 可显式更新所列关节的外部重力。各轴按自己的最近样本判定时效，使用现有的 `safety.feedback_timeout_sec`（默认 0.3 秒）。摩擦覆盖与 `tff` 仍使用 `task_torque_timeout_sec`（默认 0.5 秒），新帧省略摩擦时回到内部摩擦。缩放与偏置作用于内部项。
 
 SDK 的 `TargetClient.set_joints()` 和 `publish()` 都接受 `gravity_ff={...}`、`friction_ff={...}`。HTTP `POST /api/target` 同样接收两个可选的关节字典。原生 ROS 2 使用 `MitTargetFrame.command` 的 `target`（`JointState`）和两个 `JointFeedforward[]` 字段。每个 `JointFeedforward` 条目包含 `joint` 和 `effort`。
 
@@ -427,7 +505,9 @@ dispatch_id = client.set_joints(positions, 3.0, gravity_ff=gravity_ff)
 
 #### 在上层启动时选择重力来源
 
-`gravity_source:=internal` 或省略参数时，普通目标使用控制器原生重力。选择 `external` 时必须通过 `gravity_api` 指定可导入的 Python 工厂，格式为 `module:factory`。工厂无参，返回对象须提供 `gravity_ff(measured_positions)`，输入是七个实测关节位置的字典，输出是按关节名索引的完整保持力矩或力。API 源码目录可以通过 `PYTHONPATH` 提供。高斯 API 默认返回 J2–J5。
+MIT 控制器的 `use_gravity` 是重力补偿总开关。关闭时每轴重力前馈都是零。开启时各轴优先采用有效的外部值，其余情况使用内部计算。MuJoCo「关闭重力与碰撞」的纯 PD 配置关闭该开关。验证外部重力模型时，从「开启重力与碰撞」场景启动。
+
+`gravity_source:=internal` 或省略参数时，控制器初始使用内部重力。选择 `external` 时必须通过 `gravity_api` 指定可导入的 Python 工厂，格式为 `module:factory`。工厂无参，返回对象须提供 `gravity_ff(measured_positions)`，输入是七个实测关节位置的字典，输出是按关节名索引的完整保持力矩或力。API 源码目录可以通过 `PYTHONPATH` 提供。高斯 API 默认返回 J2–J5。
 
 从实验工作区启动独立 Web。使用内置补偿时可省略 `gravity_source`。
 
@@ -435,15 +515,16 @@ dispatch_id = client.set_joints(positions, 3.0, gravity_ff=gravity_ff)
 ./scripts/start_target_web.sh gravity_source:=internal
 ```
 
-使用同级 `gravity_identification` 目录中的高斯 API 时，执行以下命令。
+使用 `gravity_identification` 目录中的高斯 API 时，令 `gravity_root` 指向该目录。
 
 ```bash
-PYTHONPATH="$(realpath ../gravity_identification)${PYTHONPATH:+:$PYTHONPATH}" \
+gravity_root=/path/to/seeed/gravity_identification
+PYTHONPATH="$gravity_root${PYTHONPATH:+:$PYTHONPATH}" \
   ./scripts/start_target_web.sh gravity_source:=external \
   gravity_api:=neural_network.feedforward:GaussianFeedforward.load
 ```
 
-切换来源时，先按当前后端的归中和停机流程结束已有控制台。也可指定独立端口与空闲 ROS 域测试。独立控制台只启动网页和模型预览，需在网页中连接后端。网页和归中分别选择来源。
+独立控制台启动网页、模型预览和负载读取。后端连接且收到完整实测反馈后，启动时选择的外部补偿随首个有效样本生效。网页可点「使用内部重力」或「使用外部重力」手动切换。若希望先用内部、再从页面切外部，启动时同时给 `gravity_source:=internal` 和 `gravity_api:=module:factory`。切换只更新重力前馈。
 
 | 入口 | 启动选项 |
 |---|---|
@@ -454,7 +535,12 @@ PYTHONPATH="$(realpath ../gravity_identification)${PYTHONPATH:+:$PYTHONPATH}" \
 | 自有 Python ROS 2 节点 | `TargetClient(node, source, gravity_source="external", gravity_api="module:factory")`，或为该节点设置 ROS 参数 `gravity_source`、`gravity_api` |
 | 手动 ROS 2 发令工具 `scripts/dm_mit_move.py` | `--gravity-source external --gravity-api module:factory` |
 
-各入口独立选择来源。网页绝对目标和七轴增量都可用 Web 节点配置的 API。启动时加载外部工厂，模型文件或 API 加载失败会报告错误。运行时随发令用新鲜实测姿态求值。反馈不可用或模型结果无效时，目标沿用控制器内部补偿。既有的显式 `gravity_ff` 字段仍由该帧发令方决定，优先于自动计算。单次点发的 `gravity_ff` 依旧随原有目标帧超时。HTTP `/api/state` 的 `gravity_source` 与 `gravity_api` 是网页节点的启动配置，`compensation_sources` 是控制器的实际回读。
+Web、SDK、手动 CLI 和归中共用重力来源选择。默认使用内部重力。显式选择外部后，提供者按实测姿态持续更新，控制器使用各轴的新鲜外部值。停更后各轴回到内部，外部流恢复后自动采用新值。手动选内部会清除当前外部选择。手动 CLI 退出会停止它的更新，随后回到内部。
+
+- Web 的 `POST /api/gravity_source` 接收 `{"source":"internal"}` 或 `{"source":"external"}`。网页使用启动时配置的工厂。
+- SDK 可调用 `client.set_gravity_source("internal")` 或 `client.set_gravity_source("external", "module:factory")`。请求在该节点继续处理 ROS 回调时生效。
+- ROS 2 服务 `/b601_target_bridge/set_gravity_source` 接收 `b601_target_interfaces/srv/SetGravitySource`。空 `efforts` 选择内部，带外部力矩时选择外部，选中提供者可通过 `/b601_target_bridge/gravity_update` 更新。选择时省略的轴使用内部模型。既有目标帧也可用 `gravity_ff` 为所列轴提供一次外部样本。
+- 用 `/api/state` 的 `gravity_selection.selected` 看用户选择，`stale` 看是否停更，用 `compensation_sources.gravity` 核对逐轴实际采用的来源，取值为 `disabled`、`internal` 或 `external`。
 
 ### 客户端示例
 

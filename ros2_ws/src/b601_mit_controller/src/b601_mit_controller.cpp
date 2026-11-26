@@ -355,7 +355,7 @@ controller_interface::CallbackReturn B601MitController::on_init()
       RCLCPP_ERROR(node->get_logger(), "任务力矩或速度目标超时参数无效");
       return controller_interface::CallbackReturn::ERROR;
     }
-    ensure("use_gravity", use_gravity_);
+    ensure("use_gravity", use_gravity_.load());
     use_gravity_ = node->get_parameter("use_gravity").as_bool();
     // ---- 真机鲁棒性三件套（默认值即为保守值，可用 ros2 param set 现场调）----
     // ---- 指令层（Phase 1）----
@@ -426,10 +426,13 @@ rcl_interfaces::msg::SetParametersResult B601MitController::parameter_callback(
 {
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;
+  std::optional<bool> use_gravity;
   const std::size_t n = joint_names_.size();
   for (const auto & p : params) {
     const auto & name = p.get_name();
-    if (name == "gravity_scale") {
+    if (name == "use_gravity") {
+      use_gravity = p.as_bool();
+    } else if (name == "gravity_scale") {
       gravity_scale_ = std::clamp(p.as_double(), 0.0, b601_config::mit::gravity_scale_max);
     } else if (name == "friction_scale") {
       friction_scale_ = std::clamp(p.as_double(), 0.0, b601_config::mit::friction_scale_max);
@@ -457,6 +460,9 @@ rcl_interfaces::msg::SetParametersResult B601MitController::parameter_callback(
       continue;
     }
     RCLCPP_INFO(get_node()->get_logger(), "运行时更新 %s", name.c_str());
+  }
+  if (use_gravity.has_value()) {
+    use_gravity_ = *use_gravity;
   }
   return result;
 }
@@ -578,6 +584,15 @@ controller_interface::CallbackReturn B601MitController::on_configure(
   target_sub_ = node->create_subscription<b601_target_interfaces::msg::MitTarget>(
     "~/joint_target", rclcpp::SystemDefaultsQoS(),
     std::bind(&B601MitController::target_callback, this, std::placeholders::_1));
+  gravity_buffer_.writeFromNonRT(std::vector<GravitySample>(joint_names_.size()));
+  gravity_sub_ = node->create_subscription<GravityCompensation>(
+    "~/gravity_compensation", rclcpp::QoS(1),
+    [this](const GravityCompensation::SharedPtr message) {
+      EffortOverrides efforts;
+      if (read_overrides(message->efforts, efforts)) {
+        write_gravity(efforts, message->replace);
+      }
+    });
   ff_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>("~/ff", b601_config::mit::topic_depth);
   compensation_sources_pub_ = node->create_publisher<b601_target_interfaces::msg::CompensationSources>(
     "~/compensation_sources", rclcpp::SensorDataQoS());
@@ -624,6 +639,7 @@ controller_interface::CallbackReturn B601MitController::on_activate(
   tau_cmd_.assign(n, 0.0);
   ff_components_.assign(n * 3, 0.0);
   compensation_sources_.joints = joint_names_;
+  compensation_sources_.gravity_enabled = use_gravity_.load();
   compensation_sources_.gravity_external.assign(n, false);
   compensation_sources_.friction_external.assign(n, false);
   kp_cur_.assign(n, 0.0);
@@ -678,9 +694,9 @@ controller_interface::CallbackReturn B601MitController::on_activate(
   accepting_commands_ = true;
   RCLCPP_INFO(
     get_node()->get_logger(),
-    "已激活：%zu 关节，初始目标为当前位形，软硬刚度切换 %s，内部重力补偿 %s，内部摩擦补偿 %s",
+    "已激活：%zu 关节，初始目标为当前位形，软硬刚度切换 %s，重力补偿 %s，内部摩擦补偿 %s",
     n, std::any_of(free_enabled_.begin(), free_enabled_.end(), [](bool value) {return value;})
-    ? "开" : "关", use_gravity_ ? "开" : "关", friction_scale_.load() > 1e-6 ? "开" : "关");
+    ? "开" : "关", use_gravity_.load() ? "开" : "关", friction_scale_.load() > 1e-6 ? "开" : "关");
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -693,6 +709,37 @@ controller_interface::CallbackReturn B601MitController::on_deactivate(
   }
   RCLCPP_INFO(get_node()->get_logger(), "已停用：力矩命令清零");
   return controller_interface::CallbackReturn::SUCCESS;
+}
+
+bool B601MitController::read_overrides(
+  const GravityCompensation::_efforts_type & entries, EffortOverrides & values) const
+{
+  values.resize(joint_names_.size());
+  for (const auto & entry : entries) {
+    const auto joint = std::find(joint_names_.begin(), joint_names_.end(), entry.joint);
+    if (joint == joint_names_.end() || !std::isfinite(entry.effort)) {
+      return false;
+    }
+    auto & value = values[static_cast<std::size_t>(joint - joint_names_.begin())];
+    if (value.has_value()) {
+      return false;
+    }
+    value = entry.effort;
+  }
+  return true;
+}
+
+void B601MitController::write_gravity(const EffortOverrides & values, bool replace)
+{
+  auto samples = replace ? std::vector<GravitySample>(values.size()) : *gravity_buffer_.readFromNonRT();
+  const auto expires_at = SteadyClock::now() + std::chrono::duration_cast<SteadyClock::duration>(
+    std::chrono::duration<double>(b601_config::mit::gravity_feedback_timeout_sec));
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (values[i].has_value()) {
+      samples[i] = GravitySample{*values[i], expires_at};
+    }
+  }
+  gravity_buffer_.writeFromNonRT(samples);
 }
 
 void B601MitController::target_callback(
@@ -731,25 +778,14 @@ void B601MitController::target_callback(
       return;
     }
   }
-  const auto read_overrides = [this, n](const auto & entries, auto & values) {
-      values.resize(n);
-      for (const auto & entry : entries) {
-        const auto joint = std::find(joint_names_.begin(), joint_names_.end(), entry.joint);
-        if (joint == joint_names_.end() || !std::isfinite(entry.effort)) {
-          return false;
-        }
-        auto & value = values[static_cast<std::size_t>(joint - joint_names_.begin())];
-        if (value.has_value()) {
-          return false;
-        }
-        value = entry.effort;
-      }
-      return true;
-    };
-  if (!read_overrides(command->gravity_ff, cmd.gravity_ff) ||
+  EffortOverrides gravity;
+  if (!read_overrides(command->gravity_ff, gravity) ||
     !read_overrides(command->friction_ff, cmd.friction_ff))
   {
     return;
+  }
+  if (!command->gravity_ff.empty()) {
+    write_gravity(gravity, false);
   }
   cmd.stamp_ns = stamp_ns;
   cmd.seq = ++target_seq_;
@@ -843,6 +879,8 @@ controller_interface::return_type B601MitController::update(
   const bool moving_reference = velocity_fresh &&
     std::any_of(cmd->velocity.begin(), cmd->velocity.end(), [](double v) {return v != 0.0;});
   const bool feedforward_fresh = valid_target && is_fresh(cmd->stamp_ns, task_torque_timeout_sec_);
+  const auto * gravity_override = gravity_buffer_.readFromRT();
+  const auto gravity_now = SteadyClock::now();
   if (valid_target && cmd->seq != seq_seen_)
   {
     bool changed = done_ && moving_reference;
@@ -892,7 +930,9 @@ controller_interface::return_type B601MitController::update(
   }
 
   // ---- 重力前馈（整链算，取本实例关节对应的行）----
-  if (use_gravity_) {
+  const bool gravity_enabled = use_gravity_.load();
+  compensation_sources_.gravity_enabled = gravity_enabled;
+  if (gravity_enabled) {
     compute_gravity(chain_q_, tau_g_);
   } else {
     tau_g_.fill(0.0);
@@ -951,15 +991,16 @@ controller_interface::return_type B601MitController::update(
     kd_cur_[i] = move_toward(kd_cur_[i], kd_tgt, kd_step);
 
     const auto & gravity_joint_scale = authoritative ? gravity_joint_scale_ : gravity_joint_scale_free_;
-    const double internal_gravity = use_gravity_ && gravity_row_[i] >= 0
+    const double internal_gravity = gravity_enabled && gravity_row_[i] >= 0
       ? gravity_scale * (gravity_bias_[i] -
         gravity_joint_scale[i] * tau_g_[static_cast<std::size_t>(gravity_row_[i])])
       : 0.0;
     const double internal_friction =
       -friction_scale * friction_[i] * std::tanh(qd_f_[i] / friction_vel_eps_);
-    const bool gravity_external = feedforward_fresh && cmd->gravity_ff[i].has_value();
+    const bool gravity_external =
+      gravity_enabled && gravity_override && gravity_now < (*gravity_override)[i].expires_at;
     const bool friction_external = feedforward_fresh && cmd->friction_ff[i].has_value();
-    const double gravity = gravity_external ? *cmd->gravity_ff[i] : internal_gravity;
+    const double gravity = gravity_external ? (*gravity_override)[i].effort : internal_gravity;
     const double friction = friction_external ? *cmd->friction_ff[i] : internal_friction;
     compensation_sources_.gravity_external[i] = gravity_external;
     compensation_sources_.friction_external[i] = friction_external;
@@ -980,7 +1021,7 @@ controller_interface::return_type B601MitController::update(
     kp_cur_ == kp_free_ && kd_cur_ == kd_free_ &&
     std::all_of(free_enabled_.begin(), free_enabled_.end(), [](bool enabled) {return enabled;});
   if (low_stiffness_idx_ >= 0) {
-    const bool low_stiffness = soft_stiffness && use_gravity_ && gravity_scale > 0.0;
+    const bool low_stiffness = soft_stiffness && gravity_enabled && gravity_scale > 0.0;
     command_interfaces_[low_stiffness_idx_].set_value(low_stiffness ? 1.0 : 0.0);
   }
 

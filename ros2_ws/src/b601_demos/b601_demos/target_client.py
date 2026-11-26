@@ -34,7 +34,8 @@ class TargetClient:
         self.limits = project["joints"]
         self.feedback_timeout = project["safety"]["feedback_timeout_sec"]
         self.gravity = GravityProvider(
-            node, self.joints, self.feedback_timeout, source=gravity_source, api=gravity_api)
+            node, self.joints, self.feedback_timeout, source=gravity_source, api=gravity_api,
+            callback_group=callback_group)
         self.feedback = {}
         self.feedback_at = -float("inf")
         self.positions = {}
@@ -115,10 +116,7 @@ class TargetClient:
             raise RuntimeError(reply.message)
 
     def frame(self, target, *, gravity_ff=None, friction_ff=None):
-        with self.lock:
-            feedback = self.feedback, self.feedback_at
-        gravity = self.gravity.resolve(gravity_ff, feedback)
-        command = make_mit_target(target, gravity, friction_ff)
+        command = make_mit_target(target, gravity_ff, friction_ff)
         with self.lock:
             if not self.session_id:
                 raise RuntimeError("select the target source before publishing")
@@ -131,6 +129,10 @@ class TargetClient:
         with self.lock:
             self.feedback = dict(zip(message.name, message.position))
             self.feedback_at = monotonic()
+            self.gravity.feedback = (self.feedback, self.feedback_at)
+
+    def set_gravity_source(self, source, api=None):
+        self.gravity.select_source(source, api)
 
     def complete_target(self, message):
         """Expand local joint edits into one full joint target for the ROS interface."""

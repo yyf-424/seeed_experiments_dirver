@@ -3,17 +3,25 @@ import json
 from collections import deque
 from math import isfinite
 from time import monotonic_ns
+from uuid import uuid4
 
 import rclpy
 from rclpy.clock import Clock, ClockType
+from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Float64MultiArray, UInt64
+from std_msgs.msg import Bool, Float64MultiArray, String, UInt64
 
 from b601_description.project_config import load_project_config
-from b601_target_interfaces.msg import AuthorizedTarget, MitTarget
+from b601_target_interfaces.msg import AuthorizedTarget, GravityCompensation, JointFeedforward, MitTarget
+from b601_target_interfaces.srv import SetGravitySource
+
+from .mit_target import feedforward_by_joint
+
+BRIDGE = "/b601_target_bridge"
+LATCHED_QOS = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 class ControllerRoute:
@@ -21,6 +29,8 @@ class ControllerRoute:
         self.node = node
         self.joints = tuple(joints)
         self.command = node.create_publisher(MitTarget, f"/{name}/joint_target", depth)
+        gravity_qos = QoSProfile(depth=1, lifespan=Duration(nanoseconds=node.feedback_timeout_ns))
+        self.gravity = node.create_publisher(GravityCompensation, f"/{name}/gravity_compensation", gravity_qos)
         self.applied = node.create_publisher(UInt64, f"/{name}/target_applied", depth)
         self.holding = node.create_publisher(Bool, f"/{name}/target_holding", depth)
         self.epoch_request = node.create_publisher(UInt64, f"/{name}/target_epoch_requested", depth)
@@ -123,7 +133,11 @@ class ControllerRoute:
             self.send(MitTarget(target=JointState(name=list(self.joints), position=positions)), 0)
             self.hold_requested = False
         if self.queued is not None:
-            self.send(self.queued.command, self.queued.dispatch_id)
+            command = self.queued.command
+            if command.gravity_ff:
+                self.node.merge_gravity(command.gravity_ff, self.joints)
+                command = MitTarget(target=command.target, friction_ff=command.friction_ff)
+            self.send(command, self.queued.dispatch_id)
             self.queued = None
 
     def publish_status(self):
@@ -151,8 +165,73 @@ class TargetBridge(Node):
         self.feedback_ns = None
         depth = config["implementation"]["mit"]["topic_depth"]
         self.routes = [ControllerRoute(self, name, joints, depth) for name, joints in routes.items()]
+        self.joints = set().union(*(route.joints for route in self.routes))
+        self.gravity_epoch = uuid4().hex
+        self.gravity_producer = ""
+        self.gravity_external_selected = False
+        self.gravity_updates = {}
+        self.gravity_updated_at = None
+        self.gravity_status = self.create_publisher(String, "~/gravity_status", LATCHED_QOS)
+        self.create_service(SetGravitySource, "~/set_gravity_source", self.set_gravity_source)
+        self.create_subscription(
+            GravityCompensation, "~/gravity_update", self.on_gravity_update, qos_profile_sensor_data)
         self.create_subscription(JointState, "/joint_states", self.on_feedback, qos_profile_sensor_data)
         self.create_timer(timeout / 5, self.tick, clock=Clock(clock_type=ClockType.STEADY_TIME))
+
+    def set_gravity_source(self, request, response):
+        command = request.command
+        try:
+            efforts = feedforward_by_joint(command.efforts, self.joints, "gravity")
+        except ValueError as error:
+            response.message = str(error)
+            return response
+        now = monotonic_ns()
+        self.gravity_producer = command.producer_id if efforts else ""
+        self.gravity_external_selected = bool(efforts)
+        self.gravity_updated_at = now if efforts else None
+        self.publish_gravity(efforts, now, replace=True)
+        self.publish_gravity_status(now)
+        response.accepted = True
+        response.message = "external" if efforts else "internal"
+        return response
+
+    def on_gravity_update(self, command):
+        if self.gravity_producer and command.producer_id == self.gravity_producer and command.efforts:
+            self.merge_gravity(command.efforts, self.joints, from_producer=True)
+
+    def merge_gravity(self, entries, joints, *, from_producer=False):
+        try:
+            efforts = feedforward_by_joint(entries, joints, "gravity")
+        except ValueError as error:
+            self.get_logger().warning(str(error))
+            return
+        now = monotonic_ns()
+        if from_producer:
+            self.gravity_updated_at = now
+        self.publish_gravity(efforts, now)
+
+    def publish_gravity(self, efforts, now, *, replace=False):
+        if replace:
+            self.gravity_updates.clear()
+        self.gravity_updates.update(dict.fromkeys(efforts, now))
+        for route in self.routes:
+            entries = [JointFeedforward(joint=joint, effort=efforts[joint])
+                       for joint in route.joints if joint in efforts]
+            if entries or replace:
+                route.gravity.publish(GravityCompensation(efforts=entries, replace=replace))
+
+    def publish_gravity_status(self, now):
+        joints = [name for name, updated_at in self.gravity_updates.items()
+                  if now - updated_at < self.feedback_timeout_ns]
+        self.gravity_status.publish(String(data=json.dumps({
+            "epoch": self.gravity_epoch,
+            "producer_id": self.gravity_producer,
+            "source": "external" if self.gravity_external_selected else "internal",
+            "effective_source": "external" if joints else "internal",
+            "joints": joints,
+            "stale": (self.gravity_updated_at is not None
+                      and now - self.gravity_updated_at >= self.feedback_timeout_ns),
+        })))
 
     def on_feedback(self, state):
         self.feedback = {name: value for name, value in zip(state.name, state.position) if isfinite(value)}
@@ -167,6 +246,7 @@ class TargetBridge(Node):
 
     def tick(self):
         now = monotonic_ns()
+        self.publish_gravity_status(now)
         for route in self.routes:
             route.tick(now)
 

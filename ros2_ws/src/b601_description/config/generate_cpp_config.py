@@ -49,6 +49,7 @@ def render(cfg):
         "dm": {**dm, **dm["temperature"], **cfg["implementation"]["dm"]},
         "mujoco": {**dm["thermal"], **cfg["implementation"]["mujoco"]},
         "mit": {**profile["group"], **gains, **cfg["implementation"]["mit"],
+                "gravity_feedback_timeout_sec": cfg["safety"]["feedback_timeout_sec"],
                 "gravity_m_s2": cfg["model"]["gravity_m_s2"]},
     }
     # Skip nonnumeric ROS arrays. They remain in the controller YAML.

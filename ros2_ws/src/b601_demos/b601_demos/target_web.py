@@ -19,11 +19,12 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
 from b601_description.project_config import load_project_config
-from b601_target_interfaces.msg import CompensationSources, MitTargetFrame, TargetFrame
+from b601_target_interfaces.msg import CompensationSources, LoadEstimates, MitTargetFrame, TargetFrame
 from b601_target_interfaces.srv import (
     ReleaseSource, RenewSource, RevokeSource, SelectSource, SetAuthority, SetMitTarget, SetTarget,
 )
 
+from .load_api import LOAD_SITES, LOAD_TOPIC, load_estimates, load_snapshot, parse_load_positions
 from .mit_recenter import RECENTER_SERVICE
 from .mit_recenter_client import recenter_result_timeout
 from .mit_target import make_mit_target, positions_from_deltas
@@ -53,6 +54,10 @@ class TargetWeb(Node):
         robot = config["robot"]
         self.joints = (*robot["arm_joints"], robot["gripper_joint"])
         self.gravity = GravityProvider(self, self.joints, self.feedback_timeout)
+        load_positions = self.declare_parameter("load_positions", "").value
+        self.load_positions = parse_load_positions(load_positions) if load_positions else ()
+        self.load_api = self.declare_parameter("load_api", "").value
+        self.load_sample = None
         self.compensation_samples = {}
         self.status = None
         self.feedback_sample = ({}, None)
@@ -78,6 +83,7 @@ class TargetWeb(Node):
             DynamicJointState, "/dynamic_joint_states", self.on_stiffness_feedback, qos_profile_sensor_data)
         self.create_subscription(
             Bool, "/b601_mit_arm/soft_stiffness", self.on_sim_stiffness, qos_profile_sensor_data)
+        self.create_subscription(LoadEstimates, LOAD_TOPIC, self.on_load, qos_profile_sensor_data)
         for controller in config["controllers"]["mit"]["instances"]:
             self.create_subscription(
                 CompensationSources, f"/{controller}/compensation_sources",
@@ -99,6 +105,7 @@ class TargetWeb(Node):
 
     def on_feedback(self, message):
         self.feedback_sample = (dict(zip(message.name, message.position)), time.monotonic())
+        self.gravity.feedback = self.feedback_sample
 
     def on_stiffness_feedback(self, message):
         joint = next((values for name, values in zip(message.joint_names, message.interface_values)
@@ -109,20 +116,40 @@ class TargetWeb(Node):
     def on_sim_stiffness(self, message):
         self.sim_stiffness_sample = (message.data, time.monotonic())
 
+    def on_load(self, message):
+        self.load_sample = (time.monotonic(), load_snapshot(message))
+
+    def load_state(self, now):
+        sample = self.load_sample
+        if sample is not None and now - sample[0] <= self.feedback_timeout:
+            data = sample[1]
+        else:
+            sites = {name: LOAD_SITES[name] for name in self.load_positions}
+            data = load_snapshot(load_estimates(sites, {}, "waiting_node"))
+        configured = self.load_positions
+        estimates = data["estimates"]
+        return {
+            **data, "api": self.load_api, "positions": list(configured or estimates),
+            "estimates": {name: estimates[name] for name in configured if name in estimates}
+            if configured else estimates,
+        }
+
     def on_compensation_sources(self, controller, message):
         if len(message.joints) == len(message.gravity_external) == len(message.friction_external):
             self.compensation_samples[controller] = (time.monotonic(), message)
 
     def compensation_sources(self, now):
-        by_joint = {}
+        gravity, friction = {}, {}
         for received_at, message in self.compensation_samples.copy().values():
             if now - received_at <= self.feedback_timeout:
-                by_joint.update(zip(message.joints, zip(message.gravity_external, message.friction_external)))
-        if by_joint.keys() != set(self.joints):
+                for joint, gravity_external, friction_external in zip(
+                        message.joints, message.gravity_external, message.friction_external):
+                    gravity[joint] = ("external" if gravity_external else "internal") \
+                        if message.gravity_enabled else "disabled"
+                    friction[joint] = "external" if friction_external else "internal"
+        if gravity.keys() != set(self.joints):
             return None
-        return {kind: {joint: "external" if by_joint[joint][index] else "internal"
-                       for joint in self.joints}
-                for index, kind in enumerate(("gravity", "friction"))}
+        return {"gravity": gravity, "friction": friction}
 
     def on_description(self, message, *, preview=False):
         mesh_prefix = "/robot-mesh/preview" if preview else "/robot-mesh"
@@ -155,12 +182,15 @@ class TargetWeb(Node):
         connected = backend["phase"] == "connected" and self.backend.active
         if connected and sample is not None and now - sample[1] <= self.feedback_timeout:
             stiffness = "low" if sample[0] == 1.0 else "high"
+        gravity = self.gravity.snapshot()
         return {
             "status": status,
             "backend": backend,
             "stiffness": stiffness,
-            "gravity_source": self.gravity.source,
-            "gravity_api": self.gravity.api,
+            "gravity_source": gravity["requested"],
+            "gravity_api": gravity["api"] if gravity["requested"] == "external" else "",
+            "gravity_selection": gravity,
+            "load": self.load_state(now),
             "compensation_sources": self.compensation_sources(now) if connected else None,
             "recenter_ready": self.recenter.service_is_ready(),
             "feedback": {} if show_preview else feedback,
@@ -173,6 +203,9 @@ class TargetWeb(Node):
         }
 
     def request(self, path, data):
+        if path == "/api/gravity_source":
+            self.gravity.select_source(data["source"])
+            return HTTPStatus.ACCEPTED, {"accepted": True, "message": "已请求切换重力补偿"}
         if path == "/api/connect":
             return self.backend.connect(
                 data["backend"], data.get("mujoco_scene", "free"), data.get("stiffness_switching"))
@@ -214,8 +247,7 @@ class TargetWeb(Node):
                     raise ValueError(f"{key} must be an object keyed by joint name")
                 if values:
                     setattr(target, field, [float(values.get(name, 0.0)) for name in target.name])
-            gravity = self.gravity.resolve(
-                data.get("gravity_ff") if path == "/api/target" else None, feedback)
+            gravity = data.get("gravity_ff") if path == "/api/target" else None
             friction = data.get("friction_ff") if path == "/api/target" else None
             command = make_mit_target(target, gravity, friction)
             frame = {"session_id": data["session_id"], "sequence": data["sequence"]}
@@ -292,6 +324,9 @@ class TargetHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, self.server.bridge.snapshot())
             return
         bridge = self.server.bridge
+        if path == "/api/load":
+            self.send_json(HTTPStatus.OK, bridge.load_state(time.monotonic()))
+            return
         models = (bridge.robot_model, bridge.preview_model)
         if path == "/api/model":
             revision = parse_qs(url.query).get("revision", [""])[0]

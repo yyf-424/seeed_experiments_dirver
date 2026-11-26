@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <optional>
 #include <string>
 #include <vector>
@@ -17,6 +18,7 @@
 
 #include "b601_mit_controller/b601_chain.hpp"
 #include "b601_target_interfaces/msg/compensation_sources.hpp"
+#include "b601_target_interfaces/msg/gravity_compensation.hpp"
 #include "b601_target_interfaces/msg/mit_target.hpp"
 
 namespace b601_mit_controller
@@ -93,7 +95,7 @@ private:
   std::vector<double> kp_move_;
   std::vector<double> kd_move_;
   double friction_vel_eps_{b601_config::mit::friction_vel_eps};             // 关节单位/s，tanh 平滑速度
-  bool use_gravity_{b601_config::mit::use_gravity};
+  std::atomic<bool> use_gravity_{b601_config::mit::use_gravity};
   std::atomic<double> velocity_lpf_hz_{b601_config::mit::velocity_lpf_hz};  // 摩擦补偿使用的速度低通
 
   // ---- 运行时 ----
@@ -144,12 +146,23 @@ private:
     std::vector<double> q;
     std::vector<double> velocity;
     std::vector<double> tff;
-    std::vector<std::optional<double>> gravity_ff;
     std::vector<std::optional<double>> friction_ff;
     int64_t stamp_ns{0};
     uint64_t seq{0};
   };
   rt::RealtimeBuffer<TargetCommand> target_buffer_;
+  using GravityCompensation = b601_target_interfaces::msg::GravityCompensation;
+  using EffortOverrides = std::vector<std::optional<double>>;
+  bool read_overrides(const GravityCompensation::_efforts_type & entries, EffortOverrides & values) const;
+  using SteadyClock = std::chrono::steady_clock;
+  struct GravitySample
+  {
+    double effort{0.0};
+    SteadyClock::time_point expires_at;
+  };
+  void write_gravity(const EffortOverrides & values, bool replace);
+  rt::RealtimeBuffer<std::vector<GravitySample>> gravity_buffer_;
+  rclcpp::Subscription<GravityCompensation>::SharedPtr gravity_sub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr ff_pub_;
   rclcpp::Publisher<b601_target_interfaces::msg::CompensationSources>::SharedPtr compensation_sources_pub_;
   b601_target_interfaces::msg::CompensationSources compensation_sources_;

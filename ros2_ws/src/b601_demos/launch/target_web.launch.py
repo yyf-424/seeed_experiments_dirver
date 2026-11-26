@@ -1,4 +1,4 @@
-"""Start the web console and an independent URDF publisher."""
+"""Start the web console, load node, and independent URDF preview."""
 
 from http.client import HTTPConnection, HTTPException
 import json
@@ -12,8 +12,10 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 import xacro
 
+from b601_demos.load_api import DEFAULT_LOAD_API, parse_load_positions
 
-def preview_already_running(port, gravity_source, gravity_api):
+
+def preview_already_running(port, gravity_source, gravity_api, load_positions, load_api):
     if port == 0:
         return False
     connection = HTTPConnection("127.0.0.1", port, timeout=2)
@@ -30,6 +32,10 @@ def preview_already_running(port, gravity_source, gravity_api):
                     if active != requested:
                         raise RuntimeError(
                             f"端口 {port} 的控制台已用其他重力配置运行，请先结束该控制台或使用其他端口。")
+                    load = state.get("load") or {}
+                    if (load.get("positions"), load.get("api")) != (list(load_positions), load_api):
+                        raise RuntimeError(
+                            f"端口 {port} 的控制台已用其他负载配置运行，请先结束该控制台或使用其他端口。")
                     return True
     except ConnectionRefusedError:
         return False
@@ -44,7 +50,13 @@ def launch_console(context):
     port = int(LaunchConfiguration("port").perform(context))
     gravity_source = LaunchConfiguration("gravity_source").perform(context)
     gravity_api = LaunchConfiguration("gravity_api").perform(context)
-    if preview_already_running(port, gravity_source, gravity_api):
+    load_positions = parse_load_positions(LaunchConfiguration("load_positions").perform(context))
+    load_api = LaunchConfiguration("load_api").perform(context)
+    load_parameters = {
+        "load_positions": ParameterValue(",".join(load_positions), value_type=str),
+        "load_api": ParameterValue(load_api, value_type=str),
+    }
+    if preview_already_running(port, gravity_source, gravity_api, load_positions, load_api):
         return [LogInfo(msg=f"B601 控制台已运行，请打开 http://127.0.0.1:{port}/")]
 
     description = Path(get_package_share_directory("b601_description"))
@@ -64,10 +76,16 @@ def launch_console(context):
         ),
         Node(
             package="b601_demos",
+            executable="load_node",
+            output="screen",
+            parameters=[load_parameters],
+        ),
+        Node(
+            package="b601_demos",
             executable="target_web",
             output="screen",
             parameters=[{
-                "port": port, "preview_model": True,
+                "port": port, "preview_model": True, **load_parameters,
                 "gravity_source": gravity_source,
                 "gravity_api": ParameterValue(gravity_api, value_type=str),
                 "default_stiffness_switching": ParameterValue(
@@ -83,6 +101,10 @@ def generate_launch_description():
         DeclareLaunchArgument("port", default_value="8765", description="Local console HTTP port"),
         DeclareLaunchArgument("gravity_source", default_value="internal", choices=["internal", "external"]),
         DeclareLaunchArgument("gravity_api", default_value="", description="External Python module:factory"),
+        DeclareLaunchArgument(
+            "load_positions", default_value="gripper",
+            description="Comma-separated force locations: upper_arm, forearm, wrist, gripper"),
+        DeclareLaunchArgument("load_api", default_value=DEFAULT_LOAD_API, description="Load Python module:factory"),
         DeclareLaunchArgument(
             "mit_stiffness_switching", default_value="false", choices=["auto", "true", "false"],
             description="网页连接 MIT 后端时的默认软硬刚度切换选项",

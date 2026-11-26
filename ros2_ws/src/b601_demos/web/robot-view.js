@@ -122,6 +122,7 @@ export function createRobotView(section, onTcpDraft) {
   const fill = new THREE.DirectionalLight(0x9cdbff, 0.9);
   fill.position.set(-1.5, 1.6, 1.0);
   scene.add(key, fill);
+  const loadArrows = new Map();
   const ghost = new THREE.MeshBasicMaterial({
     color: "#54def8", transparent: true, opacity: 0.28, depthWrite: false,
     polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
@@ -261,6 +262,34 @@ export function createRobotView(section, onTcpDraft) {
     if (drag) finishDrag({ pointerId: drag.id });
   });
 
+  function applyLoadArrows(hasFeedback) {
+    for (const arrow of loadArrows.values()) arrow.visible = false;
+    const { load, previewPose } = latest;
+    if (!hasFeedback || previewPose || !load) return;
+    const frame = actualLayer.links.get(load.frame_id);
+    if (!frame) return;
+    const rotation = frame.getWorldQuaternion(new THREE.Quaternion());
+    for (const [name, reading] of Object.entries(load.estimates)) {
+      if (!reading.direction) continue;
+      const link = actualLayer.links.get(reading.link);
+      if (!link) continue;
+      const direction = new THREE.Vector3().fromArray(reading.direction).applyQuaternion(rotation);
+      let arrow = loadArrows.get(name);
+      if (!arrow) {
+        arrow = new THREE.ArrowHelper(direction, new THREE.Vector3(), 0.13, "#ff9d6e", 0.032, 0.022);
+        for (const part of [arrow.line, arrow.cone]) {
+          part.material.depthTest = false;
+          part.renderOrder = 2;
+        }
+        loadArrows.set(name, arrow);
+        scene.add(arrow);
+      }
+      arrow.position.copy(link.localToWorld(new THREE.Vector3().fromArray(reading.point_xyz_m)));
+      arrow.setDirection(direction);
+      arrow.visible = true;
+    }
+  }
+
   function applyPose() {
     if (!actualLayer) return;
     const { feedback, target, label, online, previewPose } = latest;
@@ -272,6 +301,7 @@ export function createRobotView(section, onTcpDraft) {
     showTarget.disabled = Boolean(previewPose);
     if (actualLayer.root.visible) actualLayer.setPose(previewPose ?? feedback);
     if (hasTarget) targetLayer.setPose({ ...feedback, ...target });
+    applyLoadArrows(hasFeedback);
     if (!latest.armJoints?.length && tcpSelected) {
       if (drag) finishDrag({ pointerId: drag.id });
       setTcpSelected(false);

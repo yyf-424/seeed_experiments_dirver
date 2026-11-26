@@ -15,7 +15,9 @@ import yaml
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from diagnostic_msgs.msg import DiagnosticStatus
+from rcl_interfaces.srv import SetParametersAtomically
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float64MultiArray, String
@@ -24,12 +26,20 @@ from std_srvs.srv import SetBool, Trigger
 from b601_description.project_config import load_project_config
 from b601_demos.target_arbiter import ARBITER
 from b601_demos.target_client import TargetClient
-from b601_target_interfaces.msg import JointFeedforward, TargetFrame
+from b601_target_interfaces.msg import CompensationSources, GravityCompensation, JointFeedforward, TargetFrame
 from b601_target_interfaces.srv import RevokeSource, SelectSource, SetAuthority, SetMitTarget, SetTarget
 
 ARM = "b601_mit_arm"
 GRIPPER = "b601_mit_gripper"
 TIMEOUT = 8.0
+
+
+class TestGravityModel:
+    def gravity_ff(self, positions):
+        return {"joint1": 0.05 + 0.1 * positions["joint1"]}
+
+
+GRAVITY_API = "test_target_arbitration:TestGravityModel"
 
 
 class TestNode(Node):
@@ -41,11 +51,21 @@ class TestNode(Node):
         self.holds = {}
         self.ff = {}
         self.controller_state = {}
+        self.gravity_mode = {}
+        self.gravity_sources = {}
+        self.gravity_enabled = {}
+        self.gravity_parameters = self.create_client(SetParametersAtomically, f"/{ARM}/set_parameters_atomically")
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(String, f"{ARBITER}/status", self.on_status, latched)
+        self.create_subscription(String, "/b601_target_bridge/gravity_status",
+                                 self.on_gravity_status, latched)
         self.create_subscription(JointState, "/joint_states", self.on_feedback, qos_profile_sensor_data)
         self.create_subscription(DiagnosticStatus, "/b601_safety/status", self.on_safety, latched)
         for controller in (ARM, GRIPPER):
+            self.create_subscription(
+                CompensationSources, f"/{controller}/compensation_sources",
+                lambda msg, controller=controller: self.on_compensation_sources(controller, msg),
+                qos_profile_sensor_data)
             self.create_subscription(
                 Bool, f"/{controller}/target_holding",
                 lambda msg, controller=controller: self.on_hold(controller, msg), 10)
@@ -59,6 +79,22 @@ class TestNode(Node):
 
     def on_status(self, message):
         self.status = json.loads(message.data)
+
+    def on_compensation_sources(self, controller, message):
+        self.gravity_enabled[controller] = message.gravity_enabled
+        self.gravity_sources[controller] = dict(zip(message.joints, message.gravity_external))
+
+    def set_gravity_enabled(self, enabled):
+        self.until(self.gravity_parameters.service_is_ready, "controller parameter service")
+        request = SetParametersAtomically.Request(
+            parameters=[Parameter("use_gravity", value=enabled).to_parameter_msg()])
+        future = self.gravity_parameters.call_async(request)
+        self.until(future.done, "controller gravity parameter reply")
+        assert future.result().result.successful, future.result().result.reason
+        self.until(lambda: self.gravity_enabled.get(ARM) is enabled, "controller must report gravity enable")
+
+    def on_gravity_status(self, message):
+        self.gravity_mode = json.loads(message.data)
 
     def on_feedback(self, message):
         self.feedback = dict(zip(message.name, message.position))
@@ -107,6 +143,30 @@ class TestNode(Node):
         )
 
 
+def test_gravity_enable(node, client):
+    node.until(lambda: node.gravity_enabled.get(ARM) is False, "pure PD starts with gravity disabled")
+    client.set_gravity_source("external", GRAVITY_API)
+    node.until(lambda: node.gravity_mode.get("effective_source") == "external",
+               "valid external samples must reach the bridge")
+    assert node.ff[ARM][6:12] == [0.0] * 6
+    assert not any(node.gravity_sources[ARM].values())
+
+    node.set_gravity_enabled(True)
+    node.until(lambda: node.gravity_sources[ARM].get("joint1") is True,
+               "the enabled controller must select the fresh external sample")
+    node.until(lambda: abs(node.ff[ARM][6]) > 0.02, "the enabled controller must apply external torque")
+    node.set_gravity_enabled(False)
+    node.until(lambda: node.ff[ARM][6:12] == [0.0] * 6, "turning off gravity must zero its output")
+    assert node.gravity_mode["source"] == "external" and not node.gravity_mode["stale"]
+    assert not any(node.gravity_sources[ARM].values())
+
+    client.set_gravity_source("internal")
+    node.until(lambda: node.gravity_mode.get("source") == "internal", "reset selection for the fixture")
+    # Exercise the existing source tests with gravity explicitly enabled on the simulated arm.
+    node.set_gravity_enabled(True)
+    print("PASS pure PD masks live external torque and the MIT enable switch works both ways")
+
+
 def test_tff(node, client, positions=None):
     names = node.status["joints"]
     if positions is None:
@@ -149,7 +209,7 @@ def test_compensation(node, client, positions=None):
 
     def internal_gravity_restored():
         gravity = node.ff[ARM][7]
-        internal = -node.controller_state[ARM][7]
+        internal = -node.controller_state[ARM][7] if has_internal_gravity else 0.0
         return abs(gravity - internal) < 0.02 and (not has_internal_gravity or abs(gravity) > 0.2)
 
     client.select(TIMEOUT)
@@ -180,17 +240,59 @@ def test_compensation(node, client, positions=None):
         client.publish(target, gravity_ff={"joint2": 0.15})
         node.check_compensation("new gravity-only stream frame must clear friction overrides",
                                 gravity={1: 0.15}, friction={0: 0.0}, finger_friction=0.0)
-        node.until(internal_gravity_restored, "timed out external gravity must restore internal gravity")
+        node.until(internal_gravity_restored, "one-shot gravity must expire without new samples")
         assert node.status["source"] == client.source
 
         client.publish(target, gravity_ff={"joint2": 0.2})
         node.check_compensation("new stream frame must apply external gravity", gravity={1: 0.2})
         node.applied(client.set_joints(positions, TIMEOUT))
-        node.until(internal_gravity_restored, "legacy target must restore internal gravity")
         assert node.status["last_forwarded"]["gravity_ff"] == {}
+        node.until(internal_gravity_restored, "a position-only frame must not renew one-shot gravity")
     finally:
         client.release(TIMEOUT)
-    print("PASS external gravity and friction routing, explicit zero, timeout and internal fallback")
+    print("PASS one-shot external gravity, explicit zero and independent expiration")
+
+    def joint1_is_external():
+        return node.gravity_sources.get(ARM, {}).get("joint1") is True
+
+    client.set_gravity_source("external", GRAVITY_API)
+    node.until(lambda: node.gravity_mode.get("source") == "external" and joint1_is_external(),
+               "SDK external producer was not selected")
+    node.until(lambda: abs(node.ff[ARM][6] - (0.05 + 0.1 * node.feedback["joint1"])) < 0.002,
+               "SDK factory output must reach the controller")
+    evaluate = client.gravity.evaluate
+    producer_id = client.gravity.id
+
+    def unavailable(_positions):
+        raise RuntimeError("test provider interruption")
+
+    client.gravity.evaluate = unavailable
+    node.until(lambda: node.gravity_mode.get("stale") and not joint1_is_external(),
+               "stopped provider must return control to internal gravity")
+    assert node.gravity_mode["source"] == "external" and node.gravity_mode["effective_source"] == "internal"
+    client.gravity.evaluate = evaluate
+    node.until(lambda: joint1_is_external() and not node.gravity_mode.get("stale"),
+               "existing external selection must recover automatically")
+
+    client.select(TIMEOUT)
+    try:
+        client.publish(target, gravity_ff={"joint2": 0.15})
+        node.until(lambda: node.gravity_sources.get(ARM, {}).get("joint2") is True,
+                   "explicit sample must update only its listed axis")
+        node.until(lambda: node.gravity_sources[ARM]["joint2"] is False and joint1_is_external(),
+                   "one stale axis must return to internal while the other axis is refreshed")
+    finally:
+        client.release(TIMEOUT)
+
+    client.set_gravity_source("internal")
+    node.until(lambda: not joint1_is_external() and node.gravity_mode.get("source") == "internal",
+               "explicit SDK reset must clear external gravity")
+    client.gravity.updates.publish(GravityCompensation(
+        producer_id=producer_id, efforts=[JointFeedforward(joint="joint1", effort=0.05)]))
+    end = time.monotonic() + 0.15
+    node.until(lambda: time.monotonic() >= end, "wait for an update from the deselected producer")
+    assert not joint1_is_external()
+    print("PASS SDK interruption, per-axis expiration, recovery and manual internal selection")
 
 
 def test_delta_target(node, client):
@@ -251,10 +353,13 @@ def test_http_and_cli(node, port, positions=None):
     if positions is None:
         positions = {name: node.feedback[name] for name in node.status["joints"]}
     internal = dict.fromkeys(positions, "internal")
-    internal_sources = {"gravity": internal, "friction": internal}
+    gravity_internal = {**internal, "finger_left": "disabled"}
+    internal_sources = {"gravity": gravity_internal, "friction": internal}
     node.until(lambda: request("state")["compensation_sources"] == internal_sources,
                "web must read internal sources from both controllers")
     session = request("select", {})["session_id"]
+    heartbeat = node.create_publisher(String, f"{ARBITER}/source_heartbeat", 10)
+    renew = node.create_timer(0.1, lambda: heartbeat.publish(String(data=session)))
     frame = {"session_id": session, "sequence": 1, "positions": positions}
     arm = [0.25, 0.0, 0.0, 0.0, 0.0, 0.0]
     zeros = [0.0] * 6
@@ -267,7 +372,7 @@ def test_http_and_cli(node, port, positions=None):
         node.check_tff(arm, 0.1, "HTTP must apply both task feedforward groups")
         node.check_compensation("HTTP must apply independent compensation overrides",
                                 gravity={0: 0.15}, friction={0: -0.1})
-        mixed_sources = {"gravity": {**internal, "joint1": "external"},
+        mixed_sources = {"gravity": {**gravity_internal, "joint1": "external"},
                          "friction": {**internal, "joint1": "external", "finger_left": "external"}}
         node.until(lambda: request("state")["compensation_sources"] == mixed_sources,
                    "web must report mixed sources and external zero on the gripper")
@@ -277,19 +382,48 @@ def test_http_and_cli(node, port, positions=None):
         node.check_tff(zeros, 0.0, "HTTP position-only target must clear both groups")
         node.check_compensation("HTTP position-only target must clear friction override", friction={0: 0.0})
         node.until(lambda: request("state")["compensation_sources"] == internal_sources,
-                   "web must report internal sources on the replacement frame")
+                   "web must report fallback after the one-shot sample expires")
         reply = request("delta_target", {"session_id": session, "sequence": 3, "deltas": {"joint1": 0.004}})
         node.applied(reply["dispatch_id"])
         assert reply["positions"] == node.status["last_forwarded"]["position"]
+        request("gravity_source", {"source": "internal"})
+        node.until(lambda: request("state")["compensation_sources"] == internal_sources,
+                   "web manual selection must restore internal sources")
+
+        request("gravity_source", {"source": "external"})
+        expected = {"gravity": mixed_sources["gravity"], "friction": internal}
+        node.until(lambda: request("state")["compensation_sources"] == expected,
+                   "web manual external selection must reach the controller")
+        first = node.ff[ARM][6]
+        command = request("delta_target", {
+            "session_id": session, "sequence": 4, "deltas": {"joint1": 0.06},
+        })
+        node.applied(command["dispatch_id"])
+        node.reaches({"joint1": command["positions"]["joint1"]}, tolerance=0.008)
+        end = time.monotonic() + 0.65
+        node.until(lambda: time.monotonic() >= end, "wait past the motion frame timeout")
+        node.until(lambda: abs(node.ff[ARM][6] - (0.05 + 0.1 * node.feedback["joint1"])) < 0.002,
+                   "external gravity must continue following the measured pose after the only target")
+        assert abs(node.ff[ARM][6] - first) > 0.003
+        assert request("state")["compensation_sources"] == expected
+        assert request("state")["status"]["last_forwarded"]["dispatch_id"] == command["dispatch_id"]
+        request("gravity_source", {"source": "internal"})
+        node.until(lambda: request("state")["compensation_sources"] == internal_sources,
+                   "web must switch back to internal on request")
     finally:
-        request("release", {"session_id": session})
-    print("PASS HTTP velocity, task feedforward, mixed compensation sources and internal fallback")
+        node.destroy_timer(renew)
+        node.destroy_publisher(heartbeat)
+        if node.status.get("source") == "web":
+            request("release", {"session_id": session})
+    print("PASS HTTP manual source switching and continuous gravity after one target")
+
     print("PASS HTTP delta target returns the resolved absolute positions")
 
     mover = Path(__file__).with_name("dm_mit_move.py")
     with subprocess.Popen([
         "python3", str(mover), "--set", "joint1=0.055,finger_left=0.015",
         "--vel", "joint1=0.01", "--tff", "joint1=0.25,finger_left=0.1",
+        "--gravity-source", "external", "--gravity-api", GRAVITY_API,
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
         try:
             node.check_tff(arm, 0.1, "CLI must apply both task feedforward groups")
@@ -300,7 +434,14 @@ def test_http_and_cli(node, port, positions=None):
         output, _ = process.communicate(timeout=5)
         assert process.returncode == 0, output
     assert node.status["last_forwarded"]["velocity"]["joint1"] == 0.01
-    print("PASS CLI position, velocity and task feedforward")
+    node.until(lambda: node.gravity_mode.get("stale"), "CLI exit must report gravity updates stopped")
+    assert node.gravity_mode["source"] == "external"
+    node.until(lambda: request("state")["compensation_sources"] == internal_sources,
+               "CLI exit must return the controller to internal gravity")
+    request("gravity_source", {"source": "internal"})
+    node.until(lambda: request("state")["compensation_sources"] == internal_sources,
+               "web manual reset must clear the CLI selection")
+    print("PASS CLI position, velocity, task feedforward and external gravity selection")
 
 
 def test(node, launch_log, http_port=None):
@@ -313,6 +454,8 @@ def test(node, launch_log, http_port=None):
     assert len(node.status["joints"]) == 7 and "controllers" not in node.status
     assert node.status["source"] is None and node.status["authority"] is None
     for controller in (ARM, GRIPPER):
+        node.until(lambda: node.get_subscriptions_info_by_topic(f"/{controller}/joint_target"),
+                   f"DDS discovery for {controller}/joint_target")
         pubs = node.get_publishers_info_by_topic(f"/{controller}/authorized_target")
         assert [info.node_name for info in pubs] == ["b601_target_arbiter"], pubs
         inputs = node.get_publishers_info_by_topic(f"/{controller}/joint_target")
@@ -320,9 +463,29 @@ def test(node, launch_log, http_port=None):
         subscribers = node.get_subscriptions_info_by_topic(f"/{controller}/joint_target")
         assert [info.node_name for info in subscribers] == [controller], subscribers
     print("PASS idle startup and one publisher per controller")
+    test_gravity_enable(node, external)
     test_delta_target(node, external)
     test_tff(node, external)
     test_compensation(node, external)
+
+    external.set_gravity_source("external", GRAVITY_API)
+    node.until(lambda: node.gravity_sources.get(ARM, {}).get("joint1") is True,
+               "fixture must have live external gravity before bridge interruption")
+    match = re.search(r"\[target_bridge-\d+\]: process started with pid \[(\d+)\]", launch_log.read_text())
+    assert match, "missing isolated MuJoCo bridge process"
+    bridge_pid = int(match.group(1))
+    os.kill(bridge_pid, signal.SIGSTOP)
+    try:
+        node.until(lambda: node.gravity_sources.get(ARM, {}).get("joint1") is False,
+                   "controller must fall back even without the bridge")
+    finally:
+        os.kill(bridge_pid, signal.SIGCONT)
+    node.until(lambda: node.gravity_sources.get(ARM, {}).get("joint1") is True,
+               "controller must recover when bridge resumes")
+    external.set_gravity_source("internal")
+    node.until(lambda: node.gravity_sources.get(ARM, {}).get("joint1") is False,
+               "manual cleanup must restore internal gravity")
+    print("PASS controller handles bridge interruption and automatic recovery")
 
     first_frame = TargetFrame(session_id="no-session", sequence=1,
                               target=JointState(name=["joint1"], position=[-0.1]))
@@ -563,6 +726,9 @@ def test_stiffness_switching(node, enabled, port=None):
 
 
 def start_fixture(output, web, physical=False, *, port=8765, stiffness_switching="auto"):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(Path(__file__).parent), env.get("PYTHONPATH")]))
+    gravity_args = [f"target_web_gravity_api:={GRAVITY_API}"] if web else []
     if physical:
         with (output / "launch.log").open("w") as stream:
             return subprocess.Popen([
@@ -570,8 +736,8 @@ def start_fixture(output, web, physical=False, *, port=8765, stiffness_switching
                 "hardware:=mujoco", "mujoco_scene:=physical",
                 "dm_command_mode:=mit_impedance", "use_rviz:=false",
                 f"mit_stiffness_switching:={stiffness_switching}",
-                f"use_target_web:={str(web).lower()}", f"target_web_port:={port}",
-            ], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+                f"use_target_web:={str(web).lower()}", f"target_web_port:={port}", *gravity_args,
+            ], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True, env=env)
 
     root = Path(__file__).resolve().parent.parent
     source = root / "ros2_ws/src"
@@ -598,8 +764,8 @@ def start_fixture(output, web, physical=False, *, port=8765, stiffness_switching
             f"mit_stiffness_switching:={stiffness_switching}",
             "mit_recenter_check_collisions:=false",
             f"initial_positions_file:={initial_path}", f"controllers_file:={controllers}",
-            f"use_target_web:={str(web).lower()}", f"target_web_port:={port}",
-        ], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+            f"use_target_web:={str(web).lower()}", f"target_web_port:={port}", *gravity_args,
+        ], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True, env=env)
 
 
 def main():

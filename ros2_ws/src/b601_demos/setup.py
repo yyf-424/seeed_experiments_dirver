@@ -35,6 +35,7 @@ setup(
             "gripper = b601_demos.gripper_control:main",
             "moveit_pose_goal = b601_demos.moveit_pose_goal:main",
             "target_web = b601_demos.target_web:main",
+            "load_node = b601_demos.load_node:main",
             "target_arbiter = b601_demos.target_arbiter:main",
             "target_bridge = b601_demos.target_bridge:main",
             "mit_recenter = b601_demos.mit_recenter:main",

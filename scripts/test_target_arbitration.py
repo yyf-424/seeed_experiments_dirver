@@ -193,6 +193,52 @@ def test_compensation(node, client, positions=None):
     print("PASS external gravity and friction routing, explicit zero, timeout and internal fallback")
 
 
+def test_delta_target(node, client):
+    names = node.status["joints"]
+    node.until(lambda: all(name in client.feedback for name in names), "SDK must receive a complete feedback sample")
+    arbiter_services = dict(node.get_service_names_and_types_by_node("b601_target_arbiter", "/"))
+    assert f"{ARBITER}/set_delta_target" not in arbiter_services
+    assert not node.get_subscriptions_info_by_topic(f"{ARBITER}/delta_target")
+    client.select(TIMEOUT)
+    try:
+        for deltas, expected in (({}, "controlled joint"), ({"finger_right": 0.01}, "controlled joint"),
+                                 ({"joint1": float("nan")}, "finite"), ({"joint1": 10.0}, "position bounds")):
+            try:
+                client.set_joint_deltas(deltas, TIMEOUT)
+            except (ValueError, RuntimeError) as error:
+                assert expected in str(error), error
+            else:
+                raise AssertionError(f"invalid delta accepted: {deltas}")
+
+        measured = {name: node.feedback[name] for name in names}
+        previous = {**measured, "joint1": measured["joint1"] + 0.25}
+        client.set_joints(previous, TIMEOUT)
+        measured = dict(node.feedback)
+        increments = {"finger_left": 0.0004, "joint1": 0.035}
+        dispatch = client.set_joint_deltas(increments, TIMEOUT)
+        node.applied(dispatch)
+        resolved = node.status["last_forwarded"]["position"]
+        assert client.positions == resolved
+        assert abs(resolved["joint1"] - measured["joint1"] - increments["joint1"]) < 0.05
+        assert abs(resolved["joint1"] - previous["joint1"]) > 0.1
+        assert abs(resolved["finger_left"] - measured["finger_left"] - increments["finger_left"]) < 0.00015
+        assert abs(resolved["joint4"] - measured["joint4"]) < 0.005
+        node.reaches({"joint1": resolved["joint1"]})
+
+        replay = client.frame(JointState(name=list(resolved), position=list(resolved.values())))
+        replay.sequence -= 1
+        result = client.call(client.sender, SetTarget.Request(frame=replay), TIMEOUT)
+        assert not result.accepted and "sequence" in result.message, result
+        client.publish_joint_deltas({"joint1": -0.008})
+        node.until(lambda: node.status["last_forwarded"]["sequence"] == client.sequence,
+                   "streaming delta target must share the absolute target sequence")
+        node.applied(node.status["last_forwarded"]["dispatch_id"])
+        assert client.positions == node.status["last_forwarded"]["position"]
+    finally:
+        client.release(TIMEOUT)
+    print("PASS SDK converts measured-relative targets before sending full ROS targets to the arbiter")
+
+
 def test_http_and_cli(node, port, positions=None):
     def request(path, body=None):
         payload = json.dumps(body).encode() if body is not None else None
@@ -232,9 +278,13 @@ def test_http_and_cli(node, port, positions=None):
         node.check_compensation("HTTP position-only target must clear friction override", friction={0: 0.0})
         node.until(lambda: request("state")["compensation_sources"] == internal_sources,
                    "web must report internal sources on the replacement frame")
+        reply = request("delta_target", {"session_id": session, "sequence": 3, "deltas": {"joint1": 0.004}})
+        node.applied(reply["dispatch_id"])
+        assert reply["positions"] == node.status["last_forwarded"]["position"]
     finally:
         request("release", {"session_id": session})
     print("PASS HTTP velocity, task feedforward, mixed compensation sources and internal fallback")
+    print("PASS HTTP delta target returns the resolved absolute positions")
 
     mover = Path(__file__).with_name("dm_mit_move.py")
     with subprocess.Popen([
@@ -270,6 +320,7 @@ def test(node, launch_log, http_port=None):
         subscribers = node.get_subscriptions_info_by_topic(f"/{controller}/joint_target")
         assert [info.node_name for info in subscribers] == [controller], subscribers
     print("PASS idle startup and one publisher per controller")
+    test_delta_target(node, external)
     test_tff(node, external)
     test_compensation(node, external)
 

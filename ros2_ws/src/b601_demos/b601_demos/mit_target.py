@@ -1,8 +1,23 @@
 """Encode and validate sparse joint feedforward for a MIT target."""
 from collections.abc import Mapping
 from math import isfinite
+from time import monotonic
 
 from b601_target_interfaces.msg import JointFeedforward, MitTarget
+
+
+def positions_from_deltas(joints, deltas, feedback_sample, feedback_timeout):
+    """Expand an upper-layer joint edit using a single measured feedback sample."""
+    if not isinstance(deltas, Mapping) or not deltas or not deltas.keys() <= set(joints):
+        raise ValueError("deltas must be keyed by controlled joint name")
+    increments = {name: float(value) for name, value in deltas.items()}
+    if not all(isfinite(value) for value in increments.values()):
+        raise ValueError("deltas must contain finite position increments")
+    feedback, received_at = feedback_sample
+    if (received_at is None or monotonic() - received_at > feedback_timeout
+            or any(not isfinite(feedback.get(name, float("nan"))) for name in joints)):
+        raise RuntimeError("delta target requires fresh measured positions for all controlled joints")
+    return {name: feedback[name] + increments.get(name, 0.0) for name in joints}
 
 
 def make_mit_target(target, gravity_ff=None, friction_ff=None):

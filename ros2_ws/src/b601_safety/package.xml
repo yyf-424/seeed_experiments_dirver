@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>b601_safety</name>
-  <version>1.1.0</version>
+  <version>1.1.1</version>
   <description>
     B601 独立安全监控节点：订阅 /joint_states，发布 NORMAL/WARNING/EMERGENCY_STOP
     三档状态；只有角度或角速度越限才触发急停，急停时停控制器并把硬件置为 INACTIVE（全臂失能）。

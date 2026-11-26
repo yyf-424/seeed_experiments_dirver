@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>b601_target_interfaces</name>
-  <version>1.1.0</version>
+  <version>1.1.1</version>
   <description>ROS 接口用于 B601 MIT 目标会话与控制器回执</description>
   <maintainer email="dave@example.com">dave</maintainer>
   <license>MIT</license>

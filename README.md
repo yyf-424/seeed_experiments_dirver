@@ -1,4 +1,4 @@
-# B601-DM ROS 2 实验工作区
+# B601-DM ROS 2 实验工作区 v1.1.1
 
 这套框架用 ROS 2 Humble 和 ros2_control 驱动 B601-DM 六轴机械臂与夹爪。
 上层提供本地网页、命令行、Python `TargetClient` 和原生 ROS 2 接口。
@@ -6,7 +6,7 @@ MoveIt 2 提供标准位置轨迹规划，MuJoCo 提供动力学仿真。
 
 **控制器目前可用，增益、重力补偿和切换表现仍需细调。**
 已完成高刚度跟踪、两档重力补偿、短时低刚度保持和归中失能的基础验收。负载变化、全工作区精度和长期低刚度表现仍待系统评估。
-实验工作区从 v1.1.0 基线接续开发，支持同帧发送位置、速度、任务前馈以及按关节覆盖重力和摩擦补偿。网页分别显示两类补偿的实时来源。网页与重力补偿启动脚本默认保持高刚度，可在启动时显式开启切换。扩展功能已在 MuJoCo 两种场景复测。见 [扩展验收](validation/target-web.md#b601_experiments-扩展验收) 和 [发布记录](CHANGELOG.md)。
+v1.1.1 支持同帧发送位置、速度、任务前馈以及按关节覆盖重力和摩擦补偿。网页分别显示两类补偿的实时来源。网页与重力补偿启动脚本默认保持高刚度，可在启动时显式开启切换。SDK、HTTP 网关和七轴增量脚本可在上层用实测位置计算绝对目标。见 [扩展验收](validation/target-web.md#b601_experiments-扩展验收) 和 [发布记录](CHANGELOG.md)。
 
 ## 演示
 
@@ -155,6 +155,8 @@ rm "$model"
 J4 实测高于 −0.10 rad 时，先向负方向移动至少 0.10 rad，并到达 −0.10 rad 或更负；已经达到预置角时保持原角度。
 随后 J1、J2、J3、J5、J6 归中，最后 J4 回落。六轴实测到位后返回成功。归中前，先让上一位目标发布者结束发令。
 
+从终端调用时，`ROS_DOMAIN_ID` 和 `ROS_LOCALHOST_ONLY` 要与运行中的后端一致。`start_mit_gravity.sh` 默认使用域 211。网页启动后端时沿用网页终端的 ROS 域。网页托管的实机可在页面先「一键归中」，到位后点「Disable」完成停机并恢复预览。
+
 ```bash
 # 只归中并保持电机使能
 ./scripts/dm_park.sh --mit --keep-enabled
@@ -201,7 +203,7 @@ python3 scripts/dm_mit_move.py --set \
 ros2 topic echo /b601_safety/status --qos-durability transient_local
 ```
 
-`limit_profile` 变为 `low_stiffness` 时开始计时。收工时先退出状态查看，再从第二个终端运行 `./scripts/dm_park.sh --mit`，完成实测归中、失能和回读。停放脚本成功后，在启动终端结束剩余节点。
+开启软硬刚度切换时，可在 `limit_profile` 变为 `low_stiffness` 后开始记录低档保持。收工时先退出状态查看，再从同一 ROS 域的第二个终端运行 `./scripts/dm_park.sh --mit`，完成实测归中、失能和回读。停放脚本成功后，在启动终端结束剩余节点。
 
 ### 安全档位与只读检查
 
@@ -378,6 +380,26 @@ SDK 支持局部编辑，首次用实测反馈补齐七关节，后续沿用同�
 `set_joints(..., velocities={...}, tff={...})` 按名称传入可选量，省略的关节取零。
 会话令牌用于命令和释放，状态话题只公布独立的公开编号。`last_forwarded` 包含已转发的 `position`、`velocity`、`tff`、`gravity_ff` 和 `friction_ff`，可用 `last_applied_id` 对照两组控制器的采纳编号。ROS 域内的应用应部署为可信节点，
 若需隔离未经授权的参与者，由部署端设置 DDS/SROS2 发布与服务权限。
+
+### 相对关节目标
+
+上层 SDK 或 HTTP 网关读取各自最新且完整的 `/joint_states`，按关节计算 `q_target = q_measured + Δq`。未指定关节的增量按零处理。`joint1` 到 `joint6` 用 rad，`finger_left` 用 m。仲裁只接收七关节绝对目标，判定会话权威、校验并转发。
+
+网页已连接后端且控制权空闲时，可按 J1–J6、主动夹爪的顺序在终端输入七个增量。下面发送一次 J1 `+0.03 rad`，脚本会输出合成后的目标和转发编号，并释放会话。网页使用其它端口时可传 `--port`。
+
+```bash
+./scripts/send_joint_deltas.py 0.03 0 0 0 0 0 0
+```
+
+已经取得整机会话的 Python `TargetClient` 可以按名称点发或流式发送增量。
+
+```python
+dispatch_id = client.set_joint_deltas({"joint2": -0.02, "joint4": 0.03}, timeout=3.0)
+```
+
+流式客户端可调用 `client.publish_joint_deltas(deltas)`。原生 ROS 2 客户端先订阅 `/joint_states` 并自行换算，再使用上表的绝对目标接口。每个新帧都以当时的实测位置起算。连续发送同一非零增量会继续生成新的目标。SDK 和 HTTP 的增量快捷入口使用默认速度参考与内部补偿配置。
+
+HTTP `POST /api/delta_target` 接收 `session_id`、递增的 `sequence` 和按关节名索引的 `deltas`。成功响应包含 `dispatch_id` 和合成后的 `positions`。反馈不齐或过期时上层拒绝计算。绝对目标沿用既有位置范围校验。
 
 ### 外部重力与摩擦前馈
 

@@ -14,7 +14,7 @@ from b601_description.project_config import load_project_config
 from b601_target_interfaces.msg import MitTargetFrame, TargetFrame
 from b601_target_interfaces.srv import ReleaseSource, RenewSource, SelectSource, SetMitTarget, SetTarget
 
-from .mit_target import make_mit_target
+from .mit_target import make_mit_target, positions_from_deltas
 from .target_arbiter import ARBITER
 
 
@@ -198,6 +198,20 @@ class TargetClient:
             velocities={joint: velocity} if velocity is not None else None,
             tff={joint: tff} if tff is not None else None,
         )
+
+    def publish_joint_deltas(self, deltas):
+        """Resolve increments locally and stream a full absolute target."""
+        positions = self._delta_positions(deltas)
+        self.publish(JointState(name=list(positions), position=list(positions.values())))
+
+    def set_joint_deltas(self, deltas, timeout, *, spinning=False):
+        """Resolve increments locally, then dispatch a full absolute target."""
+        return self.set_joints(self._delta_positions(deltas), timeout, spinning=spinning)
+
+    def _delta_positions(self, deltas):
+        with self.lock:
+            sample = self.feedback, self.feedback_at
+        return positions_from_deltas(self.joints, deltas, sample, self.feedback_timeout)
 
     def close(self, timeout):
         if rclpy.ok():

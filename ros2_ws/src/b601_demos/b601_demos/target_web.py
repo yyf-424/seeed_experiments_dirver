@@ -26,7 +26,7 @@ from b601_target_interfaces.srv import (
 
 from .mit_recenter import RECENTER_SERVICE
 from .mit_recenter_client import recenter_result_timeout
-from .mit_target import make_mit_target
+from .mit_target import make_mit_target, positions_from_deltas
 from .target_arbiter import ARBITER
 from .web_backend import WebBackend
 from .web_robot_model import build_model, find_vendor_model
@@ -50,11 +50,10 @@ class TargetWeb(Node):
         self.limits = {joint: {"min": bounds["min_pos"], "max": bounds["max_pos"]}
                        for joint, bounds in config["joints"].items()}
         robot = config["robot"]
-        self.compensation_joints = (*robot["arm_joints"], robot["gripper_joint"])
+        self.joints = (*robot["arm_joints"], robot["gripper_joint"])
         self.compensation_samples = {}
         self.status = None
-        self.feedback = {}
-        self.feedback_at = None
+        self.feedback_sample = ({}, None)
         self.stiffness_sample = None
         self.sim_stiffness_sample = None
         self.robot_model = None
@@ -97,8 +96,7 @@ class TargetWeb(Node):
         self.status = json.loads(message.data)
 
     def on_feedback(self, message):
-        self.feedback = dict(zip(message.name, message.position))
-        self.feedback_at = time.monotonic()
+        self.feedback_sample = (dict(zip(message.name, message.position)), time.monotonic())
 
     def on_stiffness_feedback(self, message):
         joint = next((values for name, values in zip(message.joint_names, message.interface_values)
@@ -118,10 +116,10 @@ class TargetWeb(Node):
         for received_at, message in self.compensation_samples.copy().values():
             if now - received_at <= self.feedback_timeout:
                 by_joint.update(zip(message.joints, zip(message.gravity_external, message.friction_external)))
-        if by_joint.keys() != set(self.compensation_joints):
+        if by_joint.keys() != set(self.joints):
             return None
         return {kind: {joint: "external" if by_joint[joint][index] else "internal"
-                       for joint in self.compensation_joints}
+                       for joint in self.joints}
                 for index, kind in enumerate(("gravity", "friction"))}
 
     def on_description(self, message, *, preview=False):
@@ -139,7 +137,7 @@ class TargetWeb(Node):
             self.robot_model = (model, assets)
 
     def snapshot(self):
-        feedback_at = self.feedback_at
+        feedback, feedback_at = self.feedback_sample
         now = time.monotonic()
         age = now - feedback_at if feedback_at is not None else None
         status = self.status if self.select.service_is_ready() else None
@@ -161,7 +159,7 @@ class TargetWeb(Node):
             "stiffness": stiffness,
             "compensation_sources": self.compensation_sources(now) if connected else None,
             "recenter_ready": self.recenter.service_is_ready(),
-            "feedback": {} if show_preview else self.feedback,
+            "feedback": {} if show_preview else feedback,
             "preview_enabled": self.preview_pose is not None,
             "preview_pose": self.preview_pose if show_preview else None,
             "model_revision": model[0]["revision"] if model else None,
@@ -212,6 +210,16 @@ class TargetWeb(Node):
             else:
                 request = SetTarget.Request(frame=TargetFrame(target=target, **frame))
                 client = self.set_target
+        elif path == "/api/delta_target":
+            try:
+                positions = positions_from_deltas(
+                    self.joints, data["deltas"], self.feedback_sample, self.feedback_timeout)
+            except RuntimeError as error:
+                return HTTPStatus.SERVICE_UNAVAILABLE, {"message": str(error)}
+            target = JointState(name=list(positions), position=list(positions.values()))
+            request = SetTarget.Request(frame=TargetFrame(
+                session_id=data["session_id"], sequence=data["sequence"], target=target))
+            client = self.set_target
         else:
             raise KeyError("unknown endpoint")
 
@@ -224,6 +232,8 @@ class TargetWeb(Node):
             result["session"] = reply.session
         if isinstance(reply, (SetTarget.Response, SetMitTarget.Response)) and reply.accepted:
             result["dispatch_id"] = str(reply.dispatch_id)
+        if path == "/api/delta_target" and reply.accepted:
+            result["positions"] = positions
         return HTTPStatus.OK if reply.accepted else HTTPStatus.CONFLICT, result
 
     def request_recenter(self, session_id):

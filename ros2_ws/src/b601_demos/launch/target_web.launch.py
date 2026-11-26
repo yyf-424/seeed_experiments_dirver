@@ -9,6 +9,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction, Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 import xacro
 
 
@@ -58,7 +59,11 @@ def launch_console(context):
             package="b601_demos",
             executable="target_web",
             output="screen",
-            parameters=[{"port": port, "preview_model": True}],
+            parameters=[{
+                "port": port, "preview_model": True,
+                "default_stiffness_switching": ParameterValue(
+                    LaunchConfiguration("mit_stiffness_switching"), value_type=str),
+            }],
             on_exit=[Shutdown()],
         ),
     ]
@@ -67,5 +72,9 @@ def launch_console(context):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("port", default_value="8765", description="Local console HTTP port"),
+        DeclareLaunchArgument(
+            "mit_stiffness_switching", default_value="false", choices=["auto", "true", "false"],
+            description="网页连接 MIT 后端时的默认软硬刚度切换选项",
+        ),
         OpaqueFunction(function=launch_console),
     ])

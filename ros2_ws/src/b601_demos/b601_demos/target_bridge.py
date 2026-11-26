@@ -1,4 +1,4 @@
-"""Forward authorized position, velocity and task feedforward to the MIT controller."""
+"""Forward authorized position, velocity and feedforward to the MIT controller."""
 import json
 from collections import deque
 from math import isfinite
@@ -13,14 +13,14 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float64MultiArray, UInt64
 
 from b601_description.project_config import load_project_config
-from b601_target_interfaces.msg import AuthorizedTarget
+from b601_target_interfaces.msg import AuthorizedTarget, MitTarget
 
 
 class ControllerRoute:
     def __init__(self, node, name, joints, depth):
         self.node = node
         self.joints = tuple(joints)
-        self.command = node.create_publisher(JointState, f"/{name}/joint_target", depth)
+        self.command = node.create_publisher(MitTarget, f"/{name}/joint_target", depth)
         self.applied = node.create_publisher(UInt64, f"/{name}/target_applied", depth)
         self.holding = node.create_publisher(Bool, f"/{name}/target_holding", depth)
         self.epoch_request = node.create_publisher(UInt64, f"/{name}/target_epoch_requested", depth)
@@ -120,10 +120,10 @@ class ControllerRoute:
             positions = self.node.measured_positions(self.joints, now)
             if positions is None:
                 return
-            self.send(JointState(name=list(self.joints), position=positions), 0)
+            self.send(MitTarget(target=JointState(name=list(self.joints), position=positions)), 0)
             self.hold_requested = False
         if self.queued is not None:
-            self.send(self.queued.target, self.queued.dispatch_id)
+            self.send(self.queued.command, self.queued.dispatch_id)
             self.queued = None
 
     def publish_status(self):

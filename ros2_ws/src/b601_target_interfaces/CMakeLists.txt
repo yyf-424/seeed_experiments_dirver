@@ -7,13 +7,18 @@ find_package(sensor_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TargetFrame.msg"
+  "msg/JointFeedforward.msg"
+  "msg/MitTarget.msg"
+  "msg/MitTargetFrame.msg"
   "msg/AuthorizedTarget.msg"
+  "msg/CompensationSources.msg"
   "srv/SelectSource.srv"
   "srv/SetAuthority.srv"
   "srv/ReleaseSource.srv"
   "srv/RevokeSource.srv"
   "srv/RenewSource.srv"
   "srv/SetTarget.srv"
+  "srv/SetMitTarget.srv"
   DEPENDENCIES sensor_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)

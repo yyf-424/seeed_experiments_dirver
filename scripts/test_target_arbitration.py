@@ -24,8 +24,8 @@ from std_srvs.srv import SetBool, Trigger
 from b601_description.project_config import load_project_config
 from b601_demos.target_arbiter import ARBITER
 from b601_demos.target_client import TargetClient
-from b601_target_interfaces.msg import TargetFrame
-from b601_target_interfaces.srv import RevokeSource, SelectSource, SetAuthority, SetTarget
+from b601_target_interfaces.msg import JointFeedforward, TargetFrame
+from b601_target_interfaces.srv import RevokeSource, SelectSource, SetAuthority, SetMitTarget, SetTarget
 
 ARM = "b601_mit_arm"
 GRIPPER = "b601_mit_gripper"
@@ -40,6 +40,7 @@ class TestNode(Node):
         self.safety = None
         self.holds = {}
         self.ff = {}
+        self.controller_state = {}
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(String, f"{ARBITER}/status", self.on_status, latched)
         self.create_subscription(JointState, "/joint_states", self.on_feedback, qos_profile_sensor_data)
@@ -51,6 +52,10 @@ class TestNode(Node):
             self.create_subscription(
                 Float64MultiArray, f"/{controller}/ff",
                 lambda msg, controller=controller: self.ff.update({controller: list(msg.data)}), 10)
+            self.create_subscription(
+                Float64MultiArray, f"/{controller}/state",
+                lambda msg, controller=controller: self.controller_state.update(
+                    {controller: list(msg.data)}), 10)
 
     def on_status(self, message):
         self.status = json.loads(message.data)
@@ -82,6 +87,17 @@ class TestNode(Node):
     def check_tff(self, arm, gripper, label):
         self.until(lambda: self.ff.get(ARM, [])[12:18] == arm
                    and self.ff.get(GRIPPER, [])[2:] == [gripper], label, timeout=2)
+
+    def check_compensation(self, label, *, gravity=None, friction=None, finger_friction=None):
+        def matches():
+            arm = self.ff.get(ARM, [])
+            finger = self.ff.get(GRIPPER, [])
+            return (len(arm) == 18 and len(finger) == 3
+                    and all(arm[6 + index] == value for index, value in (gravity or {}).items())
+                    and all(arm[index] == value for index, value in (friction or {}).items())
+                    and (finger_friction is None or finger[0] == finger_friction))
+
+        self.until(matches, label, timeout=2)
 
     def reaches(self, values, tolerance=0.004):
         self.until(
@@ -126,6 +142,57 @@ def test_tff(node, client, positions=None):
     print("PASS SDK and raw ROS 2 task feedforward, invalid frames, omitted zero and timeout")
 
 
+def test_compensation(node, client, positions=None):
+    has_internal_gravity = positions is not None
+    if positions is None:
+        positions = {name: node.feedback[name] for name in node.status["joints"]}
+
+    def internal_gravity_restored():
+        gravity = node.ff[ARM][7]
+        internal = -node.controller_state[ARM][7]
+        return abs(gravity - internal) < 0.02 and (not has_internal_gravity or abs(gravity) > 0.2)
+
+    client.select(TIMEOUT)
+    try:
+        target = JointState(name=list(reversed(positions)), position=list(reversed(positions.values())))
+        frame = client.frame(target, gravity_ff={"joint2": 0.0})
+        for invalid in (
+            JointFeedforward(joint="unknown", effort=0.1),
+            JointFeedforward(joint="joint2", effort=0.1),
+            JointFeedforward(joint="joint3", effort=float("nan")),
+        ):
+            frame.command.gravity_ff = [JointFeedforward(joint="joint2", effort=0.0), invalid]
+            assert not client.call(client.mit_sender, SetMitTarget.Request(frame=frame), TIMEOUT).accepted
+
+        dispatch = client.set_joints(
+            positions, TIMEOUT, gravity_ff={"joint2": 0.0},
+            friction_ff={"joint1": 0.2, "finger_left": -0.1}, tff={"joint1": 0.25})
+        node.applied(dispatch)
+        node.check_compensation("must apply sparse overrides including zero and both groups",
+                                gravity={1: 0.0}, friction={0: 0.2}, finger_friction=-0.1)
+        node.check_tff([0.25, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, "independent task feedforward")
+        node.until(lambda: abs(node.controller_state[ARM][0] - 0.45) < 1e-8,
+                   "controller must sum friction and task feedforward")
+        assert node.status["last_forwarded"]["gravity_ff"] == {"joint2": 0.0}
+        if has_internal_gravity:
+            assert abs(node.ff[ARM][8]) > 0.2, "unspecified J3 must still use internal gravity"
+
+        client.publish(target, gravity_ff={"joint2": 0.15})
+        node.check_compensation("new gravity-only stream frame must clear friction overrides",
+                                gravity={1: 0.15}, friction={0: 0.0}, finger_friction=0.0)
+        node.until(internal_gravity_restored, "timed out external gravity must restore internal gravity")
+        assert node.status["source"] == client.source
+
+        client.publish(target, gravity_ff={"joint2": 0.2})
+        node.check_compensation("new stream frame must apply external gravity", gravity={1: 0.2})
+        node.applied(client.set_joints(positions, TIMEOUT))
+        node.until(internal_gravity_restored, "legacy target must restore internal gravity")
+        assert node.status["last_forwarded"]["gravity_ff"] == {}
+    finally:
+        client.release(TIMEOUT)
+    print("PASS external gravity and friction routing, explicit zero, timeout and internal fallback")
+
+
 def test_http_and_cli(node, port, positions=None):
     def request(path, body=None):
         payload = json.dumps(body).encode() if body is not None else None
@@ -137,22 +204,37 @@ def test_http_and_cli(node, port, positions=None):
 
     if positions is None:
         positions = {name: node.feedback[name] for name in node.status["joints"]}
+    internal = dict.fromkeys(positions, "internal")
+    internal_sources = {"gravity": internal, "friction": internal}
+    node.until(lambda: request("state")["compensation_sources"] == internal_sources,
+               "web must read internal sources from both controllers")
     session = request("select", {})["session_id"]
     frame = {"session_id": session, "sequence": 1, "positions": positions}
     arm = [0.25, 0.0, 0.0, 0.0, 0.0, 0.0]
     zeros = [0.0] * 6
     try:
         reply = request("target", {**frame, "velocities": {"joint1": 0.01},
-                                   "tff": {"joint1": 0.25, "finger_left": 0.1}})
+                                   "tff": {"joint1": 0.25, "finger_left": 0.1},
+                                   "gravity_ff": {"joint1": 0.15},
+                                   "friction_ff": {"joint1": -0.1, "finger_left": 0.0}})
         node.applied(reply["dispatch_id"])
         node.check_tff(arm, 0.1, "HTTP must apply both task feedforward groups")
+        node.check_compensation("HTTP must apply independent compensation overrides",
+                                gravity={0: 0.15}, friction={0: -0.1})
+        mixed_sources = {"gravity": {**internal, "joint1": "external"},
+                         "friction": {**internal, "joint1": "external", "finger_left": "external"}}
+        node.until(lambda: request("state")["compensation_sources"] == mixed_sources,
+                   "web must report mixed sources and external zero on the gripper")
         assert request("state")["status"]["last_forwarded"]["velocity"]["joint1"] == 0.01
         reply = request("target", {**frame, "sequence": 2})
         node.applied(reply["dispatch_id"])
         node.check_tff(zeros, 0.0, "HTTP position-only target must clear both groups")
+        node.check_compensation("HTTP position-only target must clear friction override", friction={0: 0.0})
+        node.until(lambda: request("state")["compensation_sources"] == internal_sources,
+                   "web must report internal sources on the replacement frame")
     finally:
         request("release", {"session_id": session})
-    print("PASS HTTP velocity, task feedforward and omitted zero")
+    print("PASS HTTP velocity, task feedforward, mixed compensation sources and internal fallback")
 
     mover = Path(__file__).with_name("dm_mit_move.py")
     with subprocess.Popen([
@@ -189,6 +271,7 @@ def test(node, launch_log, http_port=None):
         assert [info.node_name for info in subscribers] == [controller], subscribers
     print("PASS idle startup and one publisher per controller")
     test_tff(node, external)
+    test_compensation(node, external)
 
     first_frame = TargetFrame(session_id="no-session", sequence=1,
                               target=JointState(name=["joint1"], position=[-0.1]))
@@ -390,16 +473,52 @@ def test_physical_recenter(node, http_port=None):
         finally:
             target.release(TIMEOUT)
         test_tff(node, target, positions=goal)
+        test_compensation(node, target, positions=goal)
         test_http_and_cli(node, http_port, positions=goal)
 
 
-def start_fixture(output, web, physical=False, *, port=8765):
+def test_stiffness_switching(node, enabled, port=None):
+    node.until(lambda: node.status.get("feedback_ready") and ARM in node.controller_state,
+               "MIT controller and feedback must be ready")
+    client = TargetClient(node, "external")
+    joint = "joint1"
+    project = load_project_config()
+    profile = project["controllers"]["mit"]["profiles"]
+    high = profile["arm_pure_pd"]["per_joint"][joint]["kp_move"]
+    low = high * profile["arm_gravity_pd"]["hold_gain_ratios"]["kp"]
+    assert node.controller_state[ARM][12] == high
+    client.select(TIMEOUT)
+    try:
+        position = node.feedback[joint] + 0.04
+        node.applied(client.set_joint(joint, position, TIMEOUT))
+        node.until(lambda: node.controller_state[ARM][48] == 1.0
+                   and node.controller_state[ARM][12] == (low if enabled else high),
+                   "settled MIT target must use the selected stiffness")
+        if port:
+            def web_reports_setting():
+                with urlopen(f"http://127.0.0.1:{port}/api/state", timeout=3) as response:
+                    snapshot = json.load(response)
+                return (snapshot["backend"]["stiffness_switching"] == str(enabled).lower()
+                        and snapshot["stiffness"] == ("low" if enabled else "high"))
+
+            node.until(web_reports_setting, "web must report the selected switch and current stiffness")
+        if enabled:
+            node.applied(client.set_joint(joint, position + 0.04, TIMEOUT))
+            node.until(lambda: node.controller_state[ARM][12] == high,
+                       "new MIT target must switch back to high stiffness")
+    finally:
+        client.release(TIMEOUT)
+    print(f"PASS MIT startup switch {enabled}: joint1 Kp {high} → {low if enabled else high}")
+
+
+def start_fixture(output, web, physical=False, *, port=8765, stiffness_switching="auto"):
     if physical:
         with (output / "launch.log").open("w") as stream:
             return subprocess.Popen([
                 "ros2", "launch", "b601_bringup", "bringup.launch.py",
                 "hardware:=mujoco", "mujoco_scene:=physical",
                 "dm_command_mode:=mit_impedance", "use_rviz:=false",
+                f"mit_stiffness_switching:={stiffness_switching}",
                 f"use_target_web:={str(web).lower()}", f"target_web_port:={port}",
             ], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
 
@@ -425,6 +544,7 @@ def start_fixture(output, web, physical=False, *, port=8765):
         return subprocess.Popen([
             "ros2", "launch", "b601_bringup", "bringup.launch.py",
             "hardware:=mujoco", "dm_command_mode:=mit_impedance", "use_rviz:=false",
+            f"mit_stiffness_switching:={stiffness_switching}",
             "mit_recenter_check_collisions:=false",
             f"initial_positions_file:={initial_path}", f"controllers_file:={controllers}",
             f"use_target_web:={str(web).lower()}", f"target_web_port:={port}",
@@ -436,6 +556,8 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--web", action="store_true", help="启动同一 MuJoCo 夹具并预览本地网页")
     mode.add_argument("--physical", action="store_true", help="验证内置物理场景的归中及失能门控")
+    mode.add_argument("--stiffness-switching", choices=("true", "false"),
+                      help="验证显式软硬刚度启动选项及实际增益")
     parser.add_argument("--http-port", type=int, help="在指定本地端口启动网页并验证 HTTP 和 CLI")
     args = parser.parse_args()
     os.environ["ROS_LOCALHOST_ONLY"] = "1"
@@ -457,7 +579,7 @@ def main():
             raise RuntimeError("Test domain already contains a robot, choose B601_TEST_ROS_DOMAIN_ID.")
         process = start_fixture(
             output, args.web or args.http_port is not None, args.physical,
-            port=args.http_port or 8765,
+            port=args.http_port or 8765, stiffness_switching=args.stiffness_switching or "auto",
         )
         if args.web:
             node.until(lambda: node.status.get("feedback_ready"),
@@ -469,6 +591,8 @@ def main():
                 raise RuntimeError(f"MuJoCo launch failed, see {output / 'launch.log'}")
         elif args.physical:
             test_physical_recenter(node, args.http_port)
+        elif args.stiffness_switching:
+            test_stiffness_switching(node, args.stiffness_switching == "true", args.http_port)
         else:
             test(node, output / "launch.log", args.http_port)
     except (KeyboardInterrupt, ExternalShutdownException):

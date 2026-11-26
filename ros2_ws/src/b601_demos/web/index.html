@@ -59,7 +59,19 @@
               <option value="physical">开启重力与碰撞</option>
             </select>
           </div>
+          <div id="stiffness-switching-controls" class="selection" hidden>
+            <label for="stiffness-switching">软硬刚度切换</label>
+            <select id="stiffness-switching" disabled>
+              <option value="auto">按后端默认</option>
+              <option value="true">开启</option>
+              <option value="false">关闭（保持高刚度）</option>
+            </select>
+          </div>
           <p id="backend-feedback" class="backend-feedback" role="status"></p>
+          <dl class="compensation-sources">
+            <div><dt>重力补偿来源</dt><dd><span id="gravity-source" role="status">待回读</span></dd></div>
+            <div><dt>摩擦补偿来源</dt><dd><span id="friction-source" role="status">待回读</span></dd></div>
+          </dl>
         </section>
         <section class="authority" aria-label="控制权">
           <div class="selection">

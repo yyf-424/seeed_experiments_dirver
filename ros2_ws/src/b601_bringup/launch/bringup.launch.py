@@ -36,14 +36,16 @@ launch 参数只是“临时覆盖”，要永久修改请改配置再跑 script
 """
 
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler, SetLaunchConfiguration
+from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction, RegisterEventHandler, SetLaunchConfiguration
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
+from launch.event_handlers import OnProcessExit, OnShutdown
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -81,6 +83,9 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     controllers_file = LaunchConfiguration("controllers_file")
     mit_gravity_compensation = LaunchConfiguration("mit_gravity_compensation")
+    mit_stiffness_switching = LaunchConfiguration("mit_stiffness_switching")
+    resolved_controller_file = LaunchConfiguration("resolved_controller_file")
+    active_stiffness_switching = LaunchConfiguration("active_stiffness_switching", default="")
     mit_recenter_check_collisions = LaunchConfiguration("mit_recenter_check_collisions")
     mit_recenter_on_startup = LaunchConfiguration("mit_recenter_on_startup")
     safety_params_file = PathJoinSubstitution([safety_share, "config", "safety_params.yaml"])
@@ -164,7 +169,7 @@ def generate_launch_description():
             output="screen",
             parameters=[
                 {"robot_description": robot_description, "use_sim_time": use_sim_time},
-                controller_file(context),
+                resolved_controller_file,
             ],
         )]
 
@@ -196,10 +201,62 @@ def generate_launch_description():
                 names = ["joint_state_broadcaster", ctrls["arm"]["name"], ctrls["gripper"]["name"]]
         return names
 
+    def configure_mit_stiffness(context):
+        config_path = controller_file(context)
+        actions = []
+        if dm_command_mode.perform(context) != "mit_impedance":
+            return [SetLaunchConfiguration("resolved_controller_file", config_path)]
+
+        config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+        types = config["controller_manager"]["ros__parameters"]
+        arm_joints = set(cfg["robot"]["arm_joints"])
+        mode = mit_stiffness_switching.perform(context)
+        arm_instance = ctrls["mit"]["instances"]["b601_mit_arm"]
+        profiles = ctrls["mit"]["profiles"]
+        hold_ratios = profiles[arm_instance["gravity_profile"]]["hold_gain_ratios"]
+        default_gains = profiles[arm_instance["profile"]]["per_joint"]
+        enabled = False
+        for name in controller_names(context):
+            if types.get(name, {}).get("type") != "b601_mit_controller/B601MitController":
+                continue
+            parameters = config[name]["ros__parameters"]
+            joints = set(parameters.get("joints", ()))
+            if not joints or not joints <= arm_joints:
+                continue
+            if mode == "true":
+                parameters.update(free_enabled=True, free_follow_feedback=True, low_after_first_target=True)
+                for gain, ratio in hold_ratios.items():
+                    if f"{gain}_free" not in parameters and f"{gain}_hold" not in parameters:
+                        move_key = f"{gain}_move"
+                        move = parameters.get(move_key)
+                        if move is None:
+                            move = [default_gains[joint][move_key] for joint in parameters["joints"]]
+                        parameters[f"{gain}_free"] = (
+                            [value * ratio for value in move] if isinstance(move, list) else move * ratio)
+            elif mode == "false":
+                parameters["free_enabled"] = False
+            free = parameters.get("free_enabled", True)
+            enabled |= any(free) if isinstance(free, list) else free
+
+        if mode != "auto":
+            temporary = TemporaryDirectory(prefix="b601-mit-controllers-")
+            output = Path(temporary.name) / "controllers.yaml"
+            output.write_text(yaml.safe_dump(config), encoding="utf-8")
+            config_path = str(output)
+            actions.append(RegisterEventHandler(OnShutdown(on_shutdown=lambda *_: temporary.cleanup())))
+
+        actual = "true" if enabled else "false"
+        return [
+            *actions,
+            SetLaunchConfiguration("resolved_controller_file", config_path),
+            SetLaunchConfiguration("active_stiffness_switching", actual),
+            LogInfo(msg=f"MIT 手臂软硬刚度切换{'已开启' if enabled else '已关闭'}（启动选项 {mode}）"),
+        ]
+
     def launch_target_arbiter(context):
         if dm_command_mode.perform(context) != "mit_impedance":
             return []
-        with open(controller_file(context), encoding="utf-8") as stream:
+        with open(resolved_controller_file.perform(context), encoding="utf-8") as stream:
             config = yaml.safe_load(stream)
         types = config["controller_manager"]["ros__parameters"]
         routes = {
@@ -234,6 +291,7 @@ def generate_launch_description():
                     "attached_backend": ParameterValue(hardware, value_type=str),
                     "attached_mujoco_scene": ParameterValue(
                         LaunchConfiguration("attached_mujoco_scene", default=""), value_type=str),
+                    "attached_stiffness_switching": ParameterValue(active_stiffness_switching, value_type=str),
                 }],
             ),
         ]
@@ -348,6 +406,10 @@ def generate_launch_description():
                 description="选择电机侧 MIT 重力补偿配置；内置 MuJoCo 物理场景使用专用高刚度配置",
             ),
             DeclareLaunchArgument(
+                "mit_stiffness_switching", default_value="auto", choices=["auto", "true", "false"],
+                description="MIT 手臂软硬刚度切换：自动按预设、显式开启或保持高刚度",
+            ),
+            DeclareLaunchArgument(
                 "mit_recenter_on_startup", default_value="true", choices=["false", "true"],
                 description="已使能的真机 MIT 控制器启动后自动归中",
             ),
@@ -373,6 +435,7 @@ def generate_launch_description():
             ),
 
             OpaqueFunction(function=configure_mujoco_scene),
+            OpaqueFunction(function=configure_mit_stiffness),
             robot_state_publisher,
             OpaqueFunction(function=launch_manager),
             OpaqueFunction(function=launch_safety),

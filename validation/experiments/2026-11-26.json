@@ -1,0 +1,527 @@
+{
+  "date": "2026-11-26",
+  "baseline": {
+    "tag": "v1.1.0",
+    "commit": "024c4621a8c9b818e135bf169c8836b8d4b717fa"
+  },
+  "scope": "Offline, mock and isolated MuJoCo",
+  "observations": [
+    "The free MuJoCo safety_monitor reported a closed ROS context during shutdown. All 11 runtime checks passed and the simulation processes exited."
+  ],
+  "verification": {
+    "packages_built": 10,
+    "static": {
+      "passed": 34,
+      "warnings": 0,
+      "failed": 0
+    },
+    "safety_unit": {
+      "passed": 81,
+      "total": 81
+    },
+    "preflight": {
+      "passed": 21,
+      "failed": 0,
+      "checks": [
+        "派生配置与 b601_project.yaml 同步",
+        "汇总：81/81 通过",
+        "汇总：34 通过 / 0 警告 / 0 失败",
+        "bringup 起来了（/joint_states 与 /b601_safety/status 都在）",
+        "启动姿态 → NORMAL（正常）",
+        "控制器 active 数量 = 3（joint_state_broadcaster + 手臂 + 夹爪）",
+        "离开启动位形（joint3=-1.2 rad）→ WARNING（警告）",
+        "警告态控制器仍在 active（3 个）—— 警告不阻止继续驱动",
+        "joint1=3.0 rad 越限→ EMERGENCY_STOP（急停）",
+        "急停后控制器全部 inactive（0 个 active）",
+        "硬件已置为 inactive（on_deactivate → disable_all，即全臂失能）",
+        "越限状态下解除急停被拒绝（符合预期）",
+        "回到安全范围后解除急停成功（且不自动恢复控制器）",
+        "joint2 角速度 999.0 rad/s → EMERGENCY_STOP（速度越限同样触发）",
+        "MuJoCo 自检通过 → 重力模型与 MuJoCo 最大静态差值 0.9430 N·m",
+        "零重力跟踪回归（稳态误差判据 0.02 rad）",
+        "变刚度状态机（slew/目标更新/整组 done/刚度斜坡）",
+        "夹爪 MIT 力控（配置序列）",
+        "电机侧 MIT 速度目标与三段前馈",
+        "重力补偿高低刚度切换与保持",
+        "过温守护（热模型升温 → 失能）"
+      ],
+      "mit_results": {
+        "track": [
+          {
+            "mode": "mit",
+            "controller": "b601_mit_arm",
+            "poses": [
+              {
+                "pose": 1,
+                "max_err": 3.0288661136289247e-10,
+                "ok": true
+              },
+              {
+                "pose": 2,
+                "max_err": 6.873983833532993e-08,
+                "ok": true
+              },
+              {
+                "pose": 3,
+                "max_err": 5.28754532103104e-08,
+                "ok": true
+              }
+            ],
+            "peak_vel": [
+              0.4372,
+              0.5664,
+              0.4605,
+              0.3203,
+              0.2075,
+              0.4864
+            ],
+            "peak_vel_max": 0.5664,
+            "estop": false,
+            "status": "-1",
+            "pass": true
+          }
+        ],
+        "state": [
+          {
+            "mode": "state_machine",
+            "pass": true
+          }
+        ],
+        "grip": [
+          {
+            "mode": "mit",
+            "controller": "b601_mit_arm",
+            "poses": [
+              {
+                "pose": 1,
+                "max_err": 0.0,
+                "ok": true
+              },
+              {
+                "pose": 2,
+                "max_err": 3.435230367873632e-08,
+                "ok": true
+              },
+              {
+                "pose": 3,
+                "max_err": 3.100109921549965e-08,
+                "ok": true
+              }
+            ],
+            "peak_vel": [
+              0.0889
+            ],
+            "peak_vel_max": 0.0889,
+            "estop": false,
+            "status": "-1",
+            "pass": true
+          }
+        ],
+        "frame": [
+          {
+            "mode": "mit_frame",
+            "velocity_displacement_rad": 0.0069567252441553986,
+            "after_velocity_timeout_rad": 1.4959537434272612e-07,
+            "task_torque_nm": 0.8,
+            "combined_joint1_nm": 0.8,
+            "task_expired": true,
+            "gravity_nm": [
+              0.0,
+              0.053981198670150235,
+              -0.6513134098739903,
+              -0.17283020367580285,
+              7.429008725780346e-05,
+              0.0009730254001376586
+            ],
+            "friction_peak_nm": 0.1,
+            "pass": true
+          }
+        ],
+        "gravity_switch": [
+          {
+            "stage": "startup_high",
+            "pass": true
+          },
+          {
+            "stage": "move_1",
+            "target_rad": [
+              0.2399999997336216,
+              -0.8399999999995792,
+              -0.9000000000005735,
+              0.2399999999981936,
+              -0.24000005532056295,
+              0.2399887897226616
+            ],
+            "band_rad": [
+              0.012,
+              0.012,
+              0.015,
+              0.012,
+              0.012,
+              0.012
+            ],
+            "controller_band_rad": [
+              0.011999999986681081,
+              0.011999999999978962,
+              0.03,
+              0.02,
+              0.02,
+              0.01199943948613308
+            ],
+            "error_rad": [
+              6.856072845007333e-07,
+              2.90785434509111e-07,
+              3.1849800186112276e-07,
+              5.305766195562445e-07,
+              2.465473725593581e-06,
+              1.0136168136692936e-05
+            ],
+            "gravity_present": true,
+            "high_gains_reached": true,
+            "done": true,
+            "pass": true
+          },
+          {
+            "stage": "hold_1",
+            "sample_span_sec": 5.021722584002418,
+            "samples": 1005,
+            "travel_rad": [
+              0.00034755500650512916,
+              0.00013451865187685819,
+              0.00014595176134724053,
+              0.00011891323178622737,
+              0.0006201689767684482,
+              1.5824755818238945e-06
+            ],
+            "handoff_travel_rad": [
+              0.0002669715474090395,
+              9.93765065853136e-05,
+              0.00010846071978332095,
+              8.943230348557041e-05,
+              0.0004785454692592672,
+              1.2063938728823498e-06
+            ],
+            "reference_error_rad": 0.0,
+            "gravity_present": true,
+            "limit_profile": "low_stiffness",
+            "pass": true
+          },
+          {
+            "stage": "move_2",
+            "target_rad": [
+              0.0004081324014172938,
+              -0.5998448392424811,
+              -0.6001688631999353,
+              -0.00013864250013576052,
+              -0.0007318136463456415,
+              -2.319810370837727e-05
+            ],
+            "band_rad": [
+              0.012,
+              0.012,
+              0.015,
+              0.012,
+              0.012,
+              0.012
+            ],
+            "controller_band_rad": [
+              0.011979593366610216,
+              0.012007758037854905,
+              0.03,
+              0.02,
+              0.02,
+              0.012000599391318499
+            ],
+            "error_rad": [
+              3.219946502356144e-10,
+              4.950692300553783e-09,
+              6.7035257345082755e-09,
+              4.519523998564078e-09,
+              5.511652865651442e-08,
+              1.1210316142226915e-05
+            ],
+            "gravity_present": true,
+            "high_gains_reached": true,
+            "done": true,
+            "pass": true
+          },
+          {
+            "stage": "hold_2",
+            "sample_span_sec": 5.020008325998788,
+            "samples": 1005,
+            "travel_rad": [
+              1.6893454390844859e-07,
+              4.830620348172943e-10,
+              6.305048705357308e-10,
+              1.1050156318941594e-09,
+              1.390227395439063e-05,
+              3.3820845547570923e-09
+            ],
+            "handoff_travel_rad": [
+              1.547895751653804e-07,
+              3.3589753201113126e-10,
+              4.510709583627204e-10,
+              8.283944095196106e-10,
+              1.0740852229360726e-05,
+              2.657824695477041e-09
+            ],
+            "reference_error_rad": 0.0,
+            "gravity_present": true,
+            "limit_profile": "low_stiffness",
+            "pass": true
+          },
+          {
+            "stage": "move_3",
+            "target_rad": [
+              0.10040790873075346,
+              -0.6998448384550052,
+              -0.7001688642824306,
+              0.09986135591345248,
+              -0.10074823131975316,
+              0.09996558755453401
+            ],
+            "band_rad": [
+              0.01,
+              0.01,
+              0.01,
+              0.01,
+              0.01,
+              0.01
+            ],
+            "controller_band_rad": [
+              0.01,
+              0.01,
+              0.03,
+              0.02,
+              0.02,
+              0.01
+            ],
+            "error_rad": [
+              2.6721051075984104e-07,
+              4.151546095787495e-08,
+              4.724183866322562e-08,
+              8.329401315898544e-08,
+              1.0342124987516854e-06,
+              1.0903868033748654e-05
+            ],
+            "gravity_present": true,
+            "high_gains_reached": true,
+            "done": true,
+            "pass": true
+          },
+          {
+            "stage": "hold_3",
+            "sample_span_sec": 5.014399937004782,
+            "samples": 1004,
+            "travel_rad": [
+              0.00013556725452333607,
+              2.1242222710826653e-05,
+              2.3822491615588248e-05,
+              2.010451496092802e-05,
+              0.00026044841294234344,
+              6.369830216484962e-07
+            ],
+            "handoff_travel_rad": [
+              0.00010426469232409363,
+              1.5788118564508125e-05,
+              1.772155837309608e-05,
+              1.5115112860369928e-05,
+              0.00020127765643396245,
+              4.969813573590942e-07
+            ],
+            "reference_error_rad": 0.0,
+            "gravity_present": true,
+            "limit_profile": "low_stiffness",
+            "pass": true
+          }
+        ],
+        "temp": [
+          {
+            "mode": "temp_trip",
+            "tripped": true,
+            "pass": true
+          }
+        ]
+      }
+    },
+    "mujoco_free": {
+      "passed": 11,
+      "checks": [
+        "idle startup and one publisher per controller",
+        "SDK and raw ROS 2 task feedforward, invalid frames, omitted zero and timeout",
+        "external gravity and friction routing, explicit zero, timeout and internal fallback",
+        "exclusive owner, full seven-joint wire target, replay rejection and both routes",
+        "operator handover, previous-session rejection, policy stream and release",
+        "HTTP velocity, task feedforward, mixed compensation sources and internal fallback",
+        "CLI position, velocity and task feedforward",
+        "MuJoCo recenter and shutdown gate block competing control sources",
+        "operator revocation matches only the selected session",
+        "source disconnect, hold after 0.637s, prior frame rejected",
+        "arbiter interrupt, hold after 0.599s, and new explicit selection"
+      ],
+      "last_joint_feedback": {
+        "joint2": -0.00021835732569824149,
+        "joint3": -0.003957313342989947,
+        "joint1": 0.07367022176330439,
+        "joint4": -0.0032308468630043692,
+        "joint5": 0.006573560714596083,
+        "finger_left": 0.015558247353858834,
+        "joint6": 0.0013354508315542126,
+        "finger_right": -0.015558247353858834
+      }
+    },
+    "mujoco_physical": {
+      "passed": 6,
+      "checks": [
+        "physical MuJoCo recenter and disable gate",
+        "physical MuJoCo recenter and disable gate",
+        "SDK and raw ROS 2 task feedforward, invalid frames, omitted zero and timeout",
+        "external gravity and friction routing, explicit zero, timeout and internal fallback",
+        "HTTP velocity, task feedforward, mixed compensation sources and internal fallback",
+        "CLI position, velocity and task feedforward"
+      ],
+      "recenter_start_rad": [
+        {
+          "joint1": -0.2769122826755377,
+          "joint2": -0.1794723683008022,
+          "joint3": -0.38004844120164494,
+          "joint4": 0.2394395984990216,
+          "joint5": 0.2321360323099938,
+          "joint6": 2.903297465585799e-06
+        },
+        {
+          "joint1": 3.0533526899786436e-07,
+          "joint2": -0.02925249920036668,
+          "joint3": -0.163837291668096,
+          "joint4": -0.18076369116092297,
+          "joint5": 5.893803197150806e-07,
+          "joint6": 1.470527972715355e-06
+        }
+      ]
+    },
+    "explicit_stiffness_switch": {
+      "enabled": {
+        "joint1_kp_at_start": 115.0,
+        "joint1_kp_after_settle": 57.5
+      },
+      "disabled": {
+        "joint1_kp_at_start": 115.0,
+        "joint1_kp_after_settle": 115.0
+      }
+    }
+  },
+  "browser_readbacks": {
+    "default_stiffness_and_all_joint_overrides": {
+      "startup_setting": "false",
+      "kp_all_samples": [
+        115.0,
+        265.0,
+        190.0,
+        200.0,
+        36.0,
+        28.0
+      ],
+      "samples": 33,
+      "gravity": {
+        "joint1": 0.03,
+        "joint2": -0.02,
+        "joint3": -0.04,
+        "joint4": 0.06,
+        "joint5": 0.07,
+        "joint6": -0.08,
+        "finger_left": 0.05
+      },
+      "friction": {
+        "joint1": -0.03,
+        "joint2": 0.01,
+        "joint3": -0.05,
+        "joint4": 0.04,
+        "joint5": 0.02,
+        "joint6": 0.09,
+        "finger_left": -0.01
+      }
+    },
+    "standalone_stiffness_selection": {
+      "default": "false",
+      "selected": "true",
+      "active": "true",
+      "rendered": "MuJoCo 已连接 · MIT 控制器已激活 · 软硬切换开启"
+    },
+    "compensation_sources": {
+      "preview": [
+        "待回读",
+        "待回读"
+      ],
+      "internal": [
+        "内部数据",
+        "内部数据"
+      ],
+      "mixed": [
+        "混合 · 外部 J2",
+        "混合 · 外部 J4、夹爪"
+      ],
+      "external": [
+        "外部传入",
+        "外部传入"
+      ],
+      "expired": [
+        "内部数据",
+        "内部数据"
+      ],
+      "disconnected": [
+        "待回读",
+        "待回读"
+      ]
+    }
+  },
+  "gravity_identification": {
+    "dataset_sha256": "f3a35f01165f4ab440e012f27f0a12580bbc3b11e6b5bb42125a2b8b23cc5fcf",
+    "raw_samples": 50,
+    "poses": 25,
+    "validation_groups": 19,
+    "sample_joint_pose": {
+      "joint1": 0.0,
+      "joint2": -0.9,
+      "joint3": -1.1,
+      "joint4": 0.25,
+      "joint5": 0.35,
+      "joint6": -0.4,
+      "finger_left": 0.02
+    },
+    "traditional": {
+      "model_sha256": "5beaed7dea5f606cec92ec120bee16392e1e79c44784aca357972c7ec94271f4",
+      "training_mse_nm2": 0.06352439233200803,
+      "group_validation_mse_nm2": 0.17771588178268116,
+      "sample_holding_effort": {
+        "joint2": 2.043626600471521,
+        "joint3": -5.929393422092151,
+        "joint4": -1.8070448101123828,
+        "joint5": -0.032264266701493974
+      }
+    },
+    "shared_neural_network": {
+      "model_sha256": "af27ecff73f52e7517b15bd5940944a35a4292b9afce24b5a749fbbfc9d9e276",
+      "family": "structure/radial_branches",
+      "training_mse_nm2": 0.056844870243829115,
+      "group_validation_mse_nm2": 0.16899479779093987,
+      "sample_holding_effort": {
+        "joint1": 0.0,
+        "joint2": 2.14314806995653,
+        "joint3": -5.860333052492685,
+        "joint4": -1.7694434303280353,
+        "joint5": 0.069508261401454,
+        "joint6": 0.00030747648695458006,
+        "finger_left": 0.0
+      },
+      "sample_learned_correction": {
+        "joint1": 0.0,
+        "joint2": 0.29550423204144477,
+        "joint3": 1.380054373580708,
+        "joint4": 0.42282153007686396,
+        "joint5": 0.05425623308291544,
+        "joint6": 0.0,
+        "finger_left": 0.0
+      }
+    }
+  }
+}

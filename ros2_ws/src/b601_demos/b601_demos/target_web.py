@@ -15,15 +15,18 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
 from b601_description.project_config import load_project_config
-from b601_target_interfaces.msg import TargetFrame
-from b601_target_interfaces.srv import ReleaseSource, RenewSource, RevokeSource, SelectSource, SetAuthority, SetTarget
+from b601_target_interfaces.msg import CompensationSources, MitTargetFrame, TargetFrame
+from b601_target_interfaces.srv import (
+    ReleaseSource, RenewSource, RevokeSource, SelectSource, SetAuthority, SetMitTarget, SetTarget,
+)
 
 from .mit_recenter import RECENTER_SERVICE
 from .mit_recenter_client import recenter_result_timeout
+from .mit_target import make_mit_target
 from .target_arbiter import ARBITER
 from .web_backend import WebBackend
 from .web_robot_model import build_model, find_vendor_model
@@ -37,16 +40,23 @@ class TargetWeb(Node):
         config = load_project_config(config_path or None)
         attached = self.declare_parameter("attached_backend", "").value
         attached_scene = self.declare_parameter("attached_mujoco_scene", "").value
-        self.backend = WebBackend(self, config, config_path, attached, attached_scene)
+        attached_stiffness = self.declare_parameter("attached_stiffness_switching", "").value
+        default_stiffness = self.declare_parameter("default_stiffness_switching", "false").value
+        self.backend = WebBackend(
+            self, config, config_path, attached, attached_scene, attached_stiffness, default_stiffness)
         self.feedback_timeout = config["safety"]["feedback_timeout_sec"]
         self.heartbeat_period_ms = round(
             config["tools"]["target_arbitration"]["authority_timeout_sec"] * 200)
         self.limits = {joint: {"min": bounds["min_pos"], "max": bounds["max_pos"]}
                        for joint, bounds in config["joints"].items()}
+        robot = config["robot"]
+        self.compensation_joints = (*robot["arm_joints"], robot["gripper_joint"])
+        self.compensation_samples = {}
         self.status = None
         self.feedback = {}
         self.feedback_at = None
         self.stiffness_sample = None
+        self.sim_stiffness_sample = None
         self.robot_model = None
         self.preview_model = None
         self.model_revision = 0
@@ -65,12 +75,20 @@ class TargetWeb(Node):
         self.create_subscription(JointState, "/joint_states", self.on_feedback, qos_profile_sensor_data)
         self.create_subscription(
             DynamicJointState, "/dynamic_joint_states", self.on_stiffness_feedback, qos_profile_sensor_data)
+        self.create_subscription(
+            Bool, "/b601_mit_arm/soft_stiffness", self.on_sim_stiffness, qos_profile_sensor_data)
+        for controller in config["controllers"]["mit"]["instances"]:
+            self.create_subscription(
+                CompensationSources, f"/{controller}/compensation_sources",
+                lambda message, name=controller: self.on_compensation_sources(name, message),
+                qos_profile_sensor_data)
         self.select = self.create_client(SelectSource, f"{ARBITER}/select_source")
         self.authority = self.create_client(SetAuthority, f"{ARBITER}/set_authority")
         self.renew = self.create_client(RenewSource, f"{ARBITER}/renew_source")
         self.release = self.create_client(ReleaseSource, f"{ARBITER}/release_source")
         self.revoke = self.create_client(RevokeSource, f"{ARBITER}/revoke_source")
         self.set_target = self.create_client(SetTarget, f"{ARBITER}/set_target")
+        self.set_mit_target = self.create_client(SetMitTarget, f"{ARBITER}/set_mit_target")
         self.recenter = self.create_client(Trigger, RECENTER_SERVICE)
         self.release_for_recenter = self.create_client(ReleaseSource, f"{ARBITER}/release_web_for_recenter")
         self.recenter_timeout = recenter_result_timeout(config)
@@ -87,6 +105,24 @@ class TargetWeb(Node):
                       if name == "joint1"), None)
         flag = dict(zip(joint.interface_names, joint.values)).get("low_stiffness") if joint else None
         self.stiffness_sample = (flag, time.monotonic()) if flag in (0.0, 1.0) else None
+
+    def on_sim_stiffness(self, message):
+        self.sim_stiffness_sample = (message.data, time.monotonic())
+
+    def on_compensation_sources(self, controller, message):
+        if len(message.joints) == len(message.gravity_external) == len(message.friction_external):
+            self.compensation_samples[controller] = (time.monotonic(), message)
+
+    def compensation_sources(self, now):
+        by_joint = {}
+        for received_at, message in self.compensation_samples.copy().values():
+            if now - received_at <= self.feedback_timeout:
+                by_joint.update(zip(message.joints, zip(message.gravity_external, message.friction_external)))
+        if by_joint.keys() != set(self.compensation_joints):
+            return None
+        return {kind: {joint: "external" if by_joint[joint][index] else "internal"
+                       for joint in self.compensation_joints}
+                for index, kind in enumerate(("gravity", "friction"))}
 
     def on_description(self, message, *, preview=False):
         mesh_prefix = "/robot-mesh/preview" if preview else "/robot-mesh"
@@ -114,15 +150,16 @@ class TargetWeb(Node):
         preview = self.preview_model
         show_preview = preview is not None and backend["phase"] == "idle"
         model = preview if show_preview else self.robot_model or preview
-        sample = self.stiffness_sample
+        sample = self.sim_stiffness_sample if backend["name"] == "mujoco" else self.stiffness_sample
         stiffness = None
-        if (backend["phase"] == "connected" and self.backend.active and sample is not None
-                and now - sample[1] <= self.feedback_timeout):
+        connected = backend["phase"] == "connected" and self.backend.active
+        if connected and sample is not None and now - sample[1] <= self.feedback_timeout:
             stiffness = "low" if sample[0] == 1.0 else "high"
         return {
             "status": status,
             "backend": backend,
             "stiffness": stiffness,
+            "compensation_sources": self.compensation_sources(now) if connected else None,
             "recenter_ready": self.recenter.service_is_ready(),
             "feedback": {} if show_preview else self.feedback,
             "preview_enabled": self.preview_pose is not None,
@@ -135,7 +172,8 @@ class TargetWeb(Node):
 
     def request(self, path, data):
         if path == "/api/connect":
-            return self.backend.connect(data["backend"], data.get("mujoco_scene", "free"))
+            return self.backend.connect(
+                data["backend"], data.get("mujoco_scene", "free"), data.get("stiffness_switching"))
         if path == "/api/disable":
             return self.backend.disable(self.call_service)
         if path == "/api/recenter":
@@ -166,9 +204,14 @@ class TargetWeb(Node):
                     raise ValueError(f"{key} must be an object keyed by joint name")
                 if values:
                     setattr(target, field, [float(values.get(name, 0.0)) for name in target.name])
-            request = SetTarget.Request(frame=TargetFrame(
-                session_id=data["session_id"], sequence=data["sequence"], target=target))
-            client = self.set_target
+            command = make_mit_target(target, data.get("gravity_ff"), data.get("friction_ff"))
+            frame = {"session_id": data["session_id"], "sequence": data["sequence"]}
+            if command.gravity_ff or command.friction_ff:
+                request = SetMitTarget.Request(frame=MitTargetFrame(command=command, **frame))
+                client = self.set_mit_target
+            else:
+                request = SetTarget.Request(frame=TargetFrame(target=target, **frame))
+                client = self.set_target
         else:
             raise KeyError("unknown endpoint")
 
@@ -179,7 +222,7 @@ class TargetWeb(Node):
         if isinstance(reply, SelectSource.Response) and reply.accepted:
             result["session_id"] = reply.session_id
             result["session"] = reply.session
-        if isinstance(reply, SetTarget.Response) and reply.accepted:
+        if isinstance(reply, (SetTarget.Response, SetMitTarget.Response)) and reply.accepted:
             result["dispatch_id"] = str(reply.dispatch_id)
         return HTTPStatus.OK if reply.accepted else HTTPStatus.CONFLICT, result
 

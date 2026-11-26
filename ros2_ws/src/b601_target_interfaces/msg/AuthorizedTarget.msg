@@ -8,4 +8,4 @@ uint64 arbiter_id
 uint64 hold_revision
 # Identifier used to correlate dispatch with the controller's applied status.
 uint64 dispatch_id
-sensor_msgs/JointState target
+b601_target_interfaces/MitTarget command

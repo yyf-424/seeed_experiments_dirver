@@ -1,5 +1,11 @@
 # 发布记录
 
+## 实验工作区 · 外部补偿与来源回读 · 2026-11-26
+
+- MIT 目标可携带按关节指定的 `gravity_ff` 和 `friction_ff`。外部值覆盖同轴内部项，显式零有效，字段缺省或过期时回退内部计算。SDK、HTTP 和 ROS 2 提供同帧入口。
+- 网页与 MIT 重力补偿启动脚本默认保持高刚度。`mit_stiffness_switching:=true` 可开启到位降档与新目标升档，网页显示本次设置及当前刚度。
+- 网页按控制器回读分别显示重力和摩擦的来源。混合时列出使用外部值的关节。 [扩展验收与数据](validation/target-web.md#b601_experiments-扩展验收)
+
 ## v1.1.0 · MIT 目标任务前馈 · 2026-11-26
 
 - 网页、HTTP、命令行、Python SDK 和原生 ROS 2 支持同帧下发七关节位置、速度和任务前馈。原生 ROS 2 使用 `JointState.effort` 承载 `tff`，手臂单位为 N·m，夹爪为 N。

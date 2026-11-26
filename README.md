@@ -1,4 +1,4 @@
-# B601-DM ROS 2 框架 v1.1.0
+# B601-DM ROS 2 实验工作区
 
 这套框架用 ROS 2 Humble 和 ros2_control 驱动 B601-DM 六轴机械臂与夹爪。
 上层提供本地网页、命令行、Python `TargetClient` 和原生 ROS 2 接口。
@@ -6,7 +6,7 @@ MoveIt 2 提供标准位置轨迹规划，MuJoCo 提供动力学仿真。
 
 **控制器目前可用，增益、重力补偿和切换表现仍需细调。**
 已完成高刚度跟踪、两档重力补偿、短时低刚度保持和归中失能的基础验收。负载变化、全工作区精度和长期低刚度表现仍待系统评估。
-v1.1.0 支持同帧下发位置、速度和 MIT 任务前馈。上层到仲裁的链路已在 MuJoCo 两种场景复测，另验证了只改变任务前馈产生的关节位移。实机覆盖按操作者确认登记。见 [上层验收](validation/target-web.md) 和 [发布记录](CHANGELOG.md)。
+实验工作区从 v1.1.0 基线接续开发，支持同帧发送位置、速度、任务前馈以及按关节覆盖重力和摩擦补偿。网页分别显示两类补偿的实时来源。网页与重力补偿启动脚本默认保持高刚度，可在启动时显式开启切换。扩展功能已在 MuJoCo 两种场景复测。见 [扩展验收](validation/target-web.md#b601_experiments-扩展验收) 和 [发布记录](CHANGELOG.md)。
 
 ## 演示
 
@@ -176,11 +176,15 @@ ros2 service call /b601_mit_recenter/recenter std_srvs/srv/Trigger '{}'
 | 重力补偿高刚度跟踪 | 115 / 120.025 / 120.025 / 30 / 18 / 28 | 5 / 5 / 5 / 2.8 / 1.6 / 0.65 |
 | 重力补偿低刚度保持 | 57.5 / 60.0125 / 60.0125 / 15 / 9 / 14 | 1 / 1 / 1 / 0.56 / 0.32 / 0.13 |
 
-`mit_gravity_compensation` 默认关闭，使用纯 PD。开启后从高刚度起步，首个目标完成且六轴连续到位 3 秒后降档，收到新目标再升档。每轴按相邻目标位移的 5% 计算到位误差带，上限为 0.05 rad。重力补偿档的下限为 J3 0.03 rad、J4 和 J5 0.02 rad、其余轴 0.01 rad。纯 PD 的六轴下限均为 0.01 rad。低档逐周期采用实测位置作为位置参考。两档共用实机辨识重力模型，高档沿用 J2–J5 的前馈比例，低档保留全轴重力比例。生成器按高档的 50% Kp 和 20% Kd 计算每轴低档增益。
+`mit_gravity_compensation` 默认关闭，使用纯 PD。启用软硬刚度切换时从高刚度起步，首个目标完成且六轴连续到位 3 秒后降档，收到新目标再升档。每轴按相邻目标位移的 5% 计算到位误差带，上限为 0.05 rad。重力补偿档的下限为 J3 0.03 rad、J4 和 J5 0.02 rad、其余轴 0.01 rad。纯 PD 的六轴下限均为 0.01 rad。低档逐周期采用实测位置作为位置参考。重力补偿配置的两档共用实机辨识重力模型，高档沿用 J2–J5 的前馈比例，低档保留全轴重力比例。低档默认使用高档的 50% Kp 和 20% Kd。
+
+每次启动可用 `mit_stiffness_switching:=true` 开启软硬刚度切换，或用 `mit_stiffness_switching:=false` 保持高刚度。`auto` 沿用所选控制器配置。启动日志显示实际选择；重力补偿仍由后端和 `mit_gravity_compensation` 决定。
 
 ### 快速启动重力补偿
 
 先核对 [实机串口和波特率](#实机串口和波特率)。ROS 域和控制选项在 [MIT 启动脚本](scripts/start_mit_gravity.sh) 顶部配置。默认使用真机电机侧 MIT、重力补偿和 `ROS_DOMAIN_ID=211`。默认会使能电机并自动归中，现场确认后再执行。只读检查时，将 `DM_ENABLE_MOTORS` 改为 `false`。
+
+脚本顶部的 `MIT_STIFFNESS_SWITCHING` 默认 `false`，重力补偿运行于高刚度档。
 
 ```bash
 ./scripts/start_mit_gravity.sh
@@ -278,6 +282,10 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 
 打开 [本地目标控制台](http://127.0.0.1:8765/)，页面会默认加载随包安装的 B601-DM 官方 STL，显示默认姿态。脚本只启动网页和预览模型发布器，URDF 发布到 `/b601_preview/robot_description`，预览姿态来自项目配置。需要另一个端口时运行 `./scripts/start_target_web.sh port:=8766`。
 
+在网页选择 MuJoCo 或实机后，「软硬刚度切换」默认关闭。连接前可选开启或按后端默认。连接后状态栏显示实际使用的设置及当前刚度。可用 `./scripts/start_target_web.sh mit_stiffness_switching:=true` 将网页首次选择预设为开启。
+
+后端区域分别显示重力和摩擦补偿的实时来源。部分关节使用外部数据时显示「混合」并列出这些关节。外部值过期后，控制器回退内部计算，网页随回读更新。显式传入的零值仍标记为外部来源。
+
 重复运行会显示已有控制台的地址并返回终端。要退出控制台，在最初启动它的终端按 `Ctrl+C`。端口被其他服务占用时，启动命令会提示选择空闲端口。
 
 需要关节反馈时，在「运行后端」选择模式，再点击「连接」。启动终端与目标客户端须使用相同的 ROS 域。网页收到后端的模型和关节反馈后切换到实测姿态。页面连接实机后，收工先按下文完成归中和 Disable，再结束启动脚本。
@@ -285,7 +293,7 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 - **Mock** 是网页的空操作，页面保持空闲。
 - **MuJoCo** 启动 MIT 控制器，默认关闭重力和物理碰撞。需要模拟重力时，连接前在
   「MuJoCo 物理模式」选择「开启重力与碰撞」，同时启用地面接触和机械臂自碰撞。
-  内置物理场景使用专用 MIT 配置，手臂按模型质量和质心做重力前馈，并保持高刚度跟踪。
+  内置物理场景使用专用 MIT 配置，手臂按模型质量和质心做重力前馈，默认保持高刚度跟踪。
 - **实机** 使用项目串口与 MIT 重力补偿变刚度。点击连接会使能电机，请按项目规程先确认现场。
   连接只启动底层控制并以进入时的实测位置作为初始参考。上层目标和自动归中需要独立操作。
   关闭浏览器不会停止 bringup。
@@ -346,8 +354,10 @@ python3 scripts/dm_mit_move.py --set 'joint1=0.035'
 | `/revoke_source` | `b601_target_interfaces/srv/RevokeSource` | 操作者按公开会话编号撤销指定会话 |
 | `/renew_source` | `b601_target_interfaces/srv/RenewSource` | 维持现有会话，接受新目标也会续期 |
 | `/set_target` | `b601_target_interfaces/srv/SetTarget` | 接收完整七关节目标，返回仲裁结果和转发编号 |
+| `/set_mit_target` | `b601_target_interfaces/srv/SetMitTarget` | 接收同帧的目标及可选外部重力、摩擦前馈 |
 | `/source_heartbeat` | `std_msgs/msg/String` | 低开销续期，`data` 为私有 `session_id` |
 | `/target` | `b601_target_interfaces/msg/TargetFrame` | 流式提交七关节目标，按会话内序号递增 |
+| `/mit_target` | `b601_target_interfaces/msg/MitTargetFrame` | 流式提交带外部补偿的目标，与 `/target` 共用序列号 |
 | `/status` | `std_msgs/msg/String` | JSON，包含指定来源、当前来源、公开会话号、最近七关节目标、整机采纳编号和掉线持位状态 |
 
 未指定来源时，第一个申请成功的客户端持有整机控制权。手动指定后，只有名称匹配的客户端可以申请。
@@ -359,14 +369,38 @@ python3 scripts/dm_mit_move.py --set 'joint1=0.035'
 | 位置 | rad | m |
 | 速度 | rad/s | m/s |
 | `tff` | N·m | N |
+| `gravity_ff`、`friction_ff` | N·m | N |
 
 每帧省略 `tff` 时，任务前馈立即归零。MIT 前馈等于重力补偿、摩擦补偿和任务前馈之和。
 原 `~/task_torque` 的发送方可迁移到同一目标帧的 `JointState.effort`，由整机会话与序号统一仲裁。
 非零任务前馈在最近一次目标采纳后默认有效 0.5 秒。只发会话心跳时，该项仍按时归零。
 SDK 支持局部编辑，首次用实测反馈补齐七关节，后续沿用同一会话已发出的其它位置。
 `set_joints(..., velocities={...}, tff={...})` 按名称传入可选量，省略的关节取零。
-会话令牌用于命令和释放，状态话题只公布独立的公开编号。`last_forwarded` 包含 `position`、`velocity` 和 `tff`，可用 `last_applied_id` 对照两组控制器的采纳编号。ROS 域内的应用应部署为可信节点，
+会话令牌用于命令和释放，状态话题只公布独立的公开编号。`last_forwarded` 包含已转发的 `position`、`velocity`、`tff`、`gravity_ff` 和 `friction_ff`，可用 `last_applied_id` 对照两组控制器的采纳编号。ROS 域内的应用应部署为可信节点，
 若需隔离未经授权的参与者，由部署端设置 DDS/SROS2 发布与服务权限。
+
+### 外部重力与摩擦前馈
+
+`gravity_ff` 和 `friction_ff` 各自接受按关节名索引的最终补偿量，手臂用 N·m，主动夹爪用 N。每个关节分别选择外部重力、摩擦或对应的内部项，再加 `tff`。显式传 `0.0` 会把该项设为零。省略字段或关节时立即使用内部项。停止发送目标后，覆盖与 `tff` 共用现有的 `task_torque_timeout_sec`，默认 0.5 秒。持续计算时应按新鲜实测位姿更新前馈，随目标帧发送。缩放、偏置及内部摩擦模型参数作用于回退使用的内部项。
+
+SDK 的 `TargetClient.set_joints()` 和 `publish()` 都接受 `gravity_ff={...}`、`friction_ff={...}`。HTTP `POST /api/target` 同样接收两个可选的关节字典。原生 ROS 2 使用 `MitTargetFrame.command` 的 `target`（`JointState`）和两个 `JointFeedforward[]` 字段。每个 `JointFeedforward` 条目包含 `joint` 和 `effort`。
+
+同级目录 `gravity_identification/` 的传统模型返回 J2–J5 的完整保持力矩。当前共享神经网络的 `predict()` 返回 `FULL_JOINTS` 顺序的七路完整保持量，包含 URDF 标称项、负载项及 J2–J5 的学习修正。`predict_compensation()` 只返回学习修正与偏置。传入 `gravity_ff` 时应使用完整保持量。只想覆盖经过辨识的关节时，只发送 J2–J5，其余关节沿用内部计算。动态摩擦由外部模型按速度求出，再传入对应的 `friction_ff`。
+
+```python
+from gravity_basis import INPUT_JOINTS, OUTPUT_JOINTS
+
+# model 是已加载的传统模型，client 已取得整机会话。
+q = [measured_positions[name] for name in INPUT_JOINTS]
+gravity_ff = dict(zip(OUTPUT_JOINTS, model.predict(q)[0].tolist()))
+dispatch_id = client.set_joints(positions, 3.0, gravity_ff=gravity_ff)
+```
+
+`/b601_mit_arm/ff` 和 `/b601_mit_gripper/ff` 按摩擦、重力、任务三段回读实际采用的值。两条原生 ROS 2 旧入口 `/target` 与 `/set_target` 仍支持位置、速度和任务前馈。
+
+各控制器的 `~/compensation_sources` 按关节回读实际选用的来源。HTTP `/api/state` 的 `compensation_sources` 提供 `gravity` 和 `friction` 两个关节字典，取值为 `internal` 或 `external`。等待可用回读时返回 `null`。
+
+### 客户端示例
 
 下面的调用可在上述 MuJoCo 预览的第二个终端运行。默认预览使用 `ROS_DOMAIN_ID=227`。
 会话在约 0.5 秒内需要持续收到心跳或新目标，建议心跳间隔 0.1 秒。CLI 调用若分开手动输入，

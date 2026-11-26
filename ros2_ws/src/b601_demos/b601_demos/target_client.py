@@ -11,9 +11,10 @@ from std_msgs.msg import String
 
 from b601_description.project_config import load_project_config
 
-from b601_target_interfaces.msg import TargetFrame
-from b601_target_interfaces.srv import ReleaseSource, RenewSource, SelectSource, SetTarget
+from b601_target_interfaces.msg import MitTargetFrame, TargetFrame
+from b601_target_interfaces.srv import ReleaseSource, RenewSource, SelectSource, SetMitTarget, SetTarget
 
+from .mit_target import make_mit_target
 from .target_arbiter import ARBITER
 
 
@@ -44,6 +45,7 @@ class TargetClient:
                 timeout / 5, self.heartbeat, callback_group=callback_group,
                 clock=Clock(clock_type=ClockType.STEADY_TIME))
         self.publisher = node.create_publisher(TargetFrame, f"{ARBITER}/target", 10)
+        self.mit_publisher = node.create_publisher(MitTargetFrame, f"{ARBITER}/mit_target", 10)
         self.selector = node.create_client(
             SelectSource, f"{ARBITER}/select_source", callback_group=callback_group)
         self.releaser = node.create_client(
@@ -52,6 +54,8 @@ class TargetClient:
             RenewSource, f"{ARBITER}/renew_source", callback_group=callback_group)
         self.sender = node.create_client(
             SetTarget, f"{ARBITER}/set_target", callback_group=callback_group)
+        self.mit_sender = node.create_client(
+            SetMitTarget, f"{ARBITER}/set_mit_target", callback_group=callback_group)
 
     def call(self, client, request, timeout, *, spinning=False):
         if not client.wait_for_service(timeout_sec=timeout):
@@ -106,11 +110,14 @@ class TargetClient:
         if not reply.accepted:
             raise RuntimeError(reply.message)
 
-    def frame(self, target):
+    def frame(self, target, *, gravity_ff=None, friction_ff=None):
+        command = make_mit_target(target, gravity_ff, friction_ff)
         with self.lock:
             if not self.session_id:
                 raise RuntimeError("select the target source before publishing")
             self.sequence += 1
+            if command.gravity_ff or command.friction_ff:
+                return MitTargetFrame(session_id=self.session_id, sequence=self.sequence, command=command)
             return TargetFrame(session_id=self.session_id, sequence=self.sequence, target=target)
 
     def on_feedback(self, message):
@@ -150,20 +157,23 @@ class TargetClient:
         )
 
     def remember_target(self, frame):
-        target = frame.target
+        target = frame.command.target if isinstance(frame, MitTargetFrame) else frame.target
         with self.lock:
             if frame.session_id == self.session_id and frame.sequence == self.sequence:
                 self.positions = dict(zip(target.name, target.position))
 
-    def publish(self, message):
-        frame = self.frame(self.complete_target(message))
-        self.publisher.publish(frame)
+    def publish(self, message, *, gravity_ff=None, friction_ff=None):
+        target = self.complete_target(message)
+        frame = self.frame(target, gravity_ff=gravity_ff, friction_ff=friction_ff)
+        publisher = self.mit_publisher if isinstance(frame, MitTargetFrame) else self.publisher
+        publisher.publish(frame)
         if (all(self.limits[name]["min_pos"] <= value <= self.limits[name]["max_pos"]
-                for name, value in zip(frame.target.name, frame.target.position))
-                and all(isfinite(value) for value in [*frame.target.velocity, *frame.target.effort])):
+                for name, value in zip(target.name, target.position))
+                and all(isfinite(value) for value in [*target.velocity, *target.effort])):
             self.remember_target(frame)
 
-    def set_joints(self, positions, timeout, *, velocities=None, tff=None, spinning=False):
+    def set_joints(self, positions, timeout, *, velocities=None, tff=None,
+                   gravity_ff=None, friction_ff=None, spinning=False):
         message = JointState(name=list(positions), position=list(positions.values()))
         target = self.complete_target(message)
         for field, values in (("velocity", velocities), ("effort", tff)):
@@ -171,8 +181,12 @@ class TargetClient:
                 if not values.keys() <= set(self.joints):
                     raise ValueError(f"unknown joint in {field}")
                 setattr(target, field, [float(values.get(name, 0.0)) for name in self.joints])
-        frame = self.frame(target)
-        reply = self.call(self.sender, SetTarget.Request(frame=frame), timeout, spinning=spinning)
+        frame = self.frame(target, gravity_ff=gravity_ff, friction_ff=friction_ff)
+        if isinstance(frame, MitTargetFrame):
+            sender, request = self.mit_sender, SetMitTarget.Request(frame=frame)
+        else:
+            sender, request = self.sender, SetTarget.Request(frame=frame)
+        reply = self.call(sender, request, timeout, spinning=spinning)
         if not reply.accepted:
             raise RuntimeError(reply.message)
         self.remember_target(frame)

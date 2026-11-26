@@ -20,14 +20,16 @@ from .target_arbiter import ARBITER
 
 BACKEND_NAMES = {"mock": "Mock", "mujoco": "MuJoCo", "dm": "实机"}
 MUJOCO_SCENES = ("free", "physical")
+STIFFNESS_SETTINGS = ("auto", "true", "false")
 
 
-def bringup_command(backend, project_file, mujoco_scene="free"):
+def bringup_command(backend, project_file, mujoco_scene="free", stiffness_switching="auto"):
     args = [
         "ros2", "launch", "b601_bringup", "bringup.launch.py",
         f"hardware:={backend}", "dm_command_mode:=mit_impedance",
         "use_rviz:=false", "use_safety:=true", "use_target_web:=false",
         "mit_recenter_on_startup:=false",
+        f"mit_stiffness_switching:={stiffness_switching}",
     ]
     if backend == "dm":
         args.extend(("dm_enable_motors:=true", "mit_gravity_compensation:=true"))
@@ -39,11 +41,14 @@ def bringup_command(backend, project_file, mujoco_scene="free"):
 
 
 class WebBackend:
-    def __init__(self, node, project, project_file, attached, attached_mujoco_scene=""):
+    def __init__(self, node, project, project_file, attached, attached_mujoco_scene,
+                 attached_stiffness_switching, default_stiffness_switching):
         self.node = node
         self.project_file = project_file
         self.attached = attached
         self.mujoco_scene = attached_mujoco_scene or None
+        self.stiffness_switching = attached_stiffness_switching or None
+        self.default_stiffness_switching = default_stiffness_switching
         self.device = Path(project["hardware"]["dm"]["device"])
         self.startup_timeout = project["tools"]["sim_mit_ros"]["startup_timeout"]
         self.controllers = {"joint_state_broadcaster", *project["controllers"]["mit"]["instances"]}
@@ -138,6 +143,8 @@ class WebBackend:
             return {
                 "name": active_backend,
                 "mujoco_scene": self.mujoco_scene if active_backend == "mujoco" else None,
+                "stiffness_switching": self.stiffness_switching if active_backend else None,
+                "default_stiffness_switching": self.default_stiffness_switching,
                 "phase": phase,
                 "message": message,
                 "can_connect": not attached and self.backend is None and self.process is None,
@@ -146,11 +153,15 @@ class WebBackend:
                 "log": str(self.log_path) if phase == "error" and self.log_path else None,
             }
 
-    def connect(self, backend, mujoco_scene="free"):
+    def connect(self, backend, mujoco_scene="free", stiffness_switching=None):
         if not isinstance(backend, str) or backend not in BACKEND_NAMES:
             return HTTPStatus.BAD_REQUEST, {"message": "请选择 Mock、MuJoCo 或实机"}
         if backend == "mujoco" and mujoco_scene not in MUJOCO_SCENES:
             return HTTPStatus.BAD_REQUEST, {"message": "请选择同时开启或关闭重力与碰撞"}
+        if stiffness_switching is None:
+            stiffness_switching = self.default_stiffness_switching
+        if stiffness_switching not in STIFFNESS_SETTINGS:
+            return HTTPStatus.BAD_REQUEST, {"message": "请选择自动、开启或关闭软硬刚度切换"}
         with self.lock:
             self.reap()
             if self.backend or self.process is not None or self.attached or self.graph_in_use():
@@ -158,11 +169,15 @@ class WebBackend:
             if backend == "mock":
                 return HTTPStatus.OK, {"message": "Mock 已选择，未启动后端"}
             try:
-                self.process = self.launch(backend, mujoco_scene)
+                self.process = self.launch(backend, mujoco_scene, stiffness_switching)
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                 return HTTPStatus.SERVICE_UNAVAILABLE, {"message": str(error)}
             self.backend = backend
             self.mujoco_scene = mujoco_scene if backend == "mujoco" else None
+            if stiffness_switching == "auto":
+                self.stiffness_switching = "true" if backend == "dm" else "false"
+            else:
+                self.stiffness_switching = stiffness_switching
             self.started_at = monotonic()
             self.disabled = False
             self.stopping = False
@@ -172,7 +187,7 @@ class WebBackend:
                 f"{BACKEND_NAMES[backend]} bringup PID {self.process.pid}，日志 {self.log_path}")
         return HTTPStatus.ACCEPTED, {"message": f"正在连接 {BACKEND_NAMES[backend]}…"}
 
-    def launch(self, backend, mujoco_scene):
+    def launch(self, backend, mujoco_scene, stiffness_switching):
         directory = Path(os.environ.get("ROS_LOG_DIR") or Path.home() / ".ros" / "log")
         directory.mkdir(parents=True, exist_ok=True)
         locks = Path(os.environ.get("XDG_RUNTIME_DIR") or Path.home() / ".ros")
@@ -200,7 +215,8 @@ class WebBackend:
                 prefix=f"b601-web-{backend}-", suffix=".log", dir=directory, delete=False))
             self.log_path = Path(output.name)
             return subprocess.Popen(
-                bringup_command(backend, self.project_file, mujoco_scene), start_new_session=True,
+                bringup_command(backend, self.project_file, mujoco_scene, stiffness_switching),
+                start_new_session=True,
                 env={**os.environ, "ROS_DOMAIN_ID": str(domain)},
                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
                 pass_fds=tuple(descriptors))

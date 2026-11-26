@@ -5,16 +5,19 @@
 
 #include <array>
 #include <atomic>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <controller_interface/controller_interface.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <realtime_tools/realtime_buffer.h>
-#include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 
 #include "b601_mit_controller/b601_chain.hpp"
+#include "b601_target_interfaces/msg/compensation_sources.hpp"
+#include "b601_target_interfaces/msg/mit_target.hpp"
 
 namespace b601_mit_controller
 {
@@ -48,7 +51,7 @@ private:
     const std::array<double, chain::kNumJoints> & q,
     std::array<double, chain::kNumJoints> & tau) const;
 
-  void target_callback(const sensor_msgs::msg::JointState::SharedPtr msg);
+  void target_callback(const b601_target_interfaces::msg::MitTarget::SharedPtr command);
   rcl_interfaces::msg::SetParametersResult parameter_callback(
     const std::vector<rclcpp::Parameter> & params);
 
@@ -141,13 +144,18 @@ private:
     std::vector<double> q;
     std::vector<double> velocity;
     std::vector<double> tff;
+    std::vector<std::optional<double>> gravity_ff;
+    std::vector<std::optional<double>> friction_ff;
     int64_t stamp_ns{0};
     uint64_t seq{0};
   };
   rt::RealtimeBuffer<TargetCommand> target_buffer_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr ff_pub_;
+  rclcpp::Publisher<b601_target_interfaces::msg::CompensationSources>::SharedPtr compensation_sources_pub_;
+  b601_target_interfaces::msg::CompensationSources compensation_sources_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr state_pub_;
-  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr target_sub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr soft_stiffness_pub_;
+  rclcpp::Subscription<b601_target_interfaces::msg::MitTarget>::SharedPtr target_sub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr debug_pub_;
   std::size_t debug_counter_{0};
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;

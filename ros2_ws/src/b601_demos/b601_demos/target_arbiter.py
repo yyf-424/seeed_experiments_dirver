@@ -14,11 +14,14 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String, UInt64
 from std_srvs.srv import SetBool
 
-from b601_target_interfaces.msg import AuthorizedTarget, TargetFrame
-from b601_target_interfaces.srv import ReleaseSource, RenewSource, RevokeSource, SelectSource, SetAuthority, SetTarget
+from b601_target_interfaces.msg import AuthorizedTarget, MitTarget, MitTargetFrame, TargetFrame
+from b601_target_interfaces.srv import (
+    ReleaseSource, RenewSource, RevokeSource, SelectSource, SetAuthority, SetMitTarget, SetTarget,
+)
 
 from b601_description.project_config import load_project_config
 
+from .mit_target import feedforward_by_joint, make_mit_target
 from .trajectory_utils import RECENTER_COMPLETED, mit_recenter_bounds
 
 ARBITER = "/b601_target_arbiter"
@@ -88,6 +91,7 @@ class TargetArbiter(Node):
             String, "~/status", QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(JointState, "/joint_states", self.on_feedback, qos_profile_sensor_data)
         self.create_subscription(TargetFrame, "~/target", self.on_target, 10)
+        self.create_subscription(MitTargetFrame, "~/mit_target", self.on_mit_target, 10)
         self.create_subscription(String, "~/source_heartbeat", self.source_heartbeat, 10)
         self.create_subscription(
             UInt64, RECENTER_COMPLETED, self.on_recenter_completed,
@@ -103,6 +107,7 @@ class TargetArbiter(Node):
             authority_timeout / 5, self.heartbeat,
             clock=Clock(clock_type=ClockType.STEADY_TIME))
         self.create_service(SetTarget, "~/set_target", self.set_target)
+        self.create_service(SetMitTarget, "~/set_mit_target", self.set_mit_target)
         self.last_event = {"event": "ready"}
         self.publish_status()
 
@@ -267,32 +272,41 @@ class TargetArbiter(Node):
         return response
 
     def on_target(self, frame):
-        self.dispatch(frame)
+        return self.dispatch(frame.session_id, frame.sequence, MitTarget(target=frame.target))
+
+    def on_mit_target(self, frame):
+        return self.dispatch(frame.session_id, frame.sequence, frame.command)
 
     def set_target(self, request, response):
-        response.accepted, response.message, response.dispatch_id = self.dispatch(request.frame)
+        response.accepted, response.message, response.dispatch_id = self.on_target(request.frame)
         return response
 
-    def dispatch(self, frame):
+    def set_mit_target(self, request, response):
+        response.accepted, response.message, response.dispatch_id = self.on_mit_target(request.frame)
+        return response
+
+    def dispatch(self, session_id, sequence, command):
         now = monotonic_ns()
         self.expire_sessions(now)
-        session = self.session if self.session and self.session.id == frame.session_id else None
+        session = self.session if self.session and self.session.id == session_id else None
         source = session.source if session else ""
         try:
-            positions, velocities, tff = self.prepare(frame, session)
+            positions, velocities, tff, gravity_ff, friction_ff = self.prepare(command, sequence, session)
         except ValueError as error:
             self.event("reject", source, str(error))
             return False, str(error), 0
 
         self.dispatch_id += 1
-        session.sequence = frame.sequence
+        session.sequence = sequence
         session.expires_at = now + self.authority_timeout_ns
         self.dispatched = {
             "source": source, "session": session.status_id,
-            "sequence": frame.sequence, "dispatch_id": str(self.dispatch_id),
+            "sequence": sequence, "dispatch_id": str(self.dispatch_id),
             "position": {name: positions[name] for name in self.joints},
             "velocity": {name: velocities.get(name, 0.0) for name in self.joints},
             "tff": {name: tff.get(name, 0.0) for name in self.joints},
+            "gravity_ff": gravity_ff,
+            "friction_ff": friction_ff,
         }
         for controller, joints in self.routes.items():
             target = JointState(
@@ -300,19 +314,23 @@ class TargetArbiter(Node):
                 velocity=[velocities[name] for name in joints] if velocities else [],
                 effort=[tff.get(name, 0.0) for name in joints],
             )
+            routed_command = make_mit_target(
+                target, {name: gravity_ff[name] for name in joints if name in gravity_ff},
+                {name: friction_ff[name] for name in joints if name in friction_ff},
+            )
             self.outputs[controller].publish(
                 AuthorizedTarget(kind=AuthorizedTarget.TARGET, arbiter_id=self.epochs[controller],
                                  hold_revision=self.hold_revisions[controller],
-                                 dispatch_id=self.dispatch_id, target=target))
+                                 dispatch_id=self.dispatch_id, command=routed_command))
         self.event("dispatch", source, "accepted")
         return True, "accepted for dispatch", self.dispatch_id
 
-    def prepare(self, frame, session):
+    def prepare(self, command, sequence, session):
         if session is None:
             raise ValueError("unknown or released session")
-        if frame.sequence <= session.sequence:
+        if sequence <= session.sequence:
             raise ValueError("sequence must increase")
-        msg = frame.target
+        msg = command.target
         names = msg.name
         if (len(names) != len(self.joints) or set(names) != set(self.joints)
                 or len(msg.position) != len(names)
@@ -324,11 +342,16 @@ class TargetArbiter(Node):
         tff = dict(zip(names, msg.effort))
         if not all(isfinite(value) for value in [*positions.values(), *velocities.values(), *tff.values()]):
             raise ValueError("non-finite target")
+        gravity_ff = feedforward_by_joint(command.gravity_ff, positions, "gravity_ff")
+        friction_ff = feedforward_by_joint(command.friction_ff, positions, "friction_ff")
+        for name in gravity_ff.keys() | friction_ff.keys():
+            if not isfinite(gravity_ff.get(name, 0.0) + friction_ff.get(name, 0.0) + tff.get(name, 0.0)):
+                raise ValueError(f"non-finite combined feedforward for {name}")
         for name, value in positions.items():
             bounds = self.limits[name]
             if not bounds["min_pos"] <= value <= bounds["max_pos"]:
                 raise ValueError(f"{name} outside configured position bounds")
-        return positions, velocities, tff
+        return positions, velocities, tff, gravity_ff, friction_ff
 
     def on_applied(self, controller, message):
         previous = self.applied.get(controller, 0)

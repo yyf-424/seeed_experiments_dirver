@@ -1,0 +1,5 @@
+b601_target_interfaces/MitTargetFrame frame
+---
+bool accepted
+string message
+uint64 dispatch_id

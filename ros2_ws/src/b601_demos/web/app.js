@@ -5,6 +5,8 @@ const inputSource = element("input-source");
 const backendSelect = element("backend");
 const mujocoSceneControls = element("mujoco-scene-controls");
 const mujocoSceneSelect = element("mujoco-scene");
+const stiffnessSwitchingControls = element("stiffness-switching-controls");
+const stiffnessSwitchingSelect = element("stiffness-switching");
 const connectButton = element("connect");
 const disableButton = element("disable");
 const recenterButton = element("recenter");
@@ -14,6 +16,7 @@ const sourceLabels = new Map([
 ]);
 let session;
 let shownBackend;
+let stiffnessSelectionInitialized = false;
 let backendReply;
 const rows = new Map();
 const edited = new Set();
@@ -131,6 +134,28 @@ function makeRows(names) {
   }
 }
 
+function showCompensationSource(kind) {
+  const output = element(`${kind}-source`);
+  const byJoint = snapshot.compensation_sources?.[kind];
+  const joints = Object.keys(byJoint || {});
+  const external = joints.filter((name) => byJoint[name] === "external");
+  let source = "unknown";
+  let label = "待回读";
+  if (joints.length && external.length === joints.length) {
+    source = "external";
+    label = "外部传入";
+  } else if (external.length) {
+    source = "mixed";
+    const axes = external.map((name) => name === "finger_left" ? "夹爪" : name.replace(/^joint(\d+)$/, "J$1"));
+    label = `混合 · 外部 ${axes.join("、")}`;
+  } else if (joints.length) {
+    source = "internal";
+    label = "内部数据";
+  }
+  output.dataset.source = source;
+  if (output.textContent !== label) output.textContent = label;
+}
+
 function refreshBackend() {
   const backend = snapshot.backend;
   if (backend?.name && backend.name !== shownBackend) backendSelect.value = backend.name;
@@ -141,11 +166,20 @@ function refreshBackend() {
     || !Object.hasOwn(backend, "mujoco_scene")
     || (backend.name === "mujoco" && !backend.mujoco_scene);
   mujocoSceneSelect.disabled = backendSelect.disabled;
+  if (!stiffnessSelectionInitialized && backend?.default_stiffness_switching) {
+    stiffnessSwitchingSelect.value = backend.default_stiffness_switching;
+    stiffnessSelectionInitialized = true;
+  }
+  stiffnessSwitchingControls.hidden = backendSelect.value === "mock" || !backend?.can_connect;
+  stiffnessSwitchingSelect.disabled = backendSelect.disabled;
   connectButton.disabled = busy || !backend?.can_connect;
   disableButton.disabled = busy || !backend?.can_disable;
   const connection = element("connection");
   connection.dataset.connected = String(backend?.phase === "connected");
-  connection.textContent = backend?.message || "等待连接";
+  const setting = backend?.stiffness_switching;
+  const connectionMessage = backend?.message || "等待连接";
+  connection.textContent = setting ? `${connectionMessage} · 软硬切换${setting === "true" ? "开启" : "关闭"}`
+    : connectionMessage;
   const feedback = element("backend-feedback");
   feedback.dataset.error = String(!!backendReply?.error || backend?.phase === "error");
   feedback.textContent = backend?.log || backendReply?.message || backend?.disable_reason
@@ -156,6 +190,8 @@ function refreshBackend() {
     stiffness.dataset.mode = mode;
     stiffness.textContent = stiffnessLabels[mode] || "刚度待回读";
   }
+  showCompensationSource("gravity");
+  showCompensationSource("friction");
 }
 
 async function changeBackend(path, payload) {
@@ -214,6 +250,7 @@ async function poll() {
     snapshot.status = null;
     snapshot.backend = null;
     snapshot.stiffness = null;
+    snapshot.compensation_sources = null;
     refresh();
     notice(error.message, true);
   } finally {
@@ -313,6 +350,7 @@ connectButton.addEventListener("click", () => mutate(() => {
   const backend = backendSelect.value;
   const payload = { backend };
   if (!mujocoSceneControls.hidden) payload.mujoco_scene = mujocoSceneSelect.value;
+  if (backend !== "mock") payload.stiffness_switching = stiffnessSwitchingSelect.value;
   return changeBackend("/api/connect", payload);
 }));
 disableButton.addEventListener("click", () => mutate(() => changeBackend("/api/disable", {})));

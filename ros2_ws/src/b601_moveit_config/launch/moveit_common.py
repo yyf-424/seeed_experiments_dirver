@@ -58,12 +58,15 @@ def launch_moveit(context):
     use_sim_time = LaunchConfiguration("use_sim_time").perform(context) == "true"
     mode = trajectory_mode(context)
     moveit_config = build_moveit_configs(hardware, mode)
+    allow_execution = LaunchConfiguration(
+        "allow_trajectory_execution", default="true").perform(context) == "true"
     clock = {"use_sim_time": use_sim_time}
     actions = [
         Node(package="moveit_ros_move_group", executable="move_group", output="screen",
-             parameters=[moveit_config.to_dict(), clock]),
+             parameters=[moveit_config.to_dict(), clock, {"allow_trajectory_execution": allow_execution}]),
     ]
-    if mode == "mit_impedance" and LaunchConfiguration("start_mit_trajectory").perform(context) == "true":
+    start_mit = LaunchConfiguration("start_mit_trajectory").perform(context) == "true"
+    if allow_execution and mode == "mit_impedance" and start_mit:
         actions.insert(0, Node(package="b601_demos", executable="mit_trajectory", output="screen",
                                parameters=[clock]))
     if LaunchConfiguration("use_rviz").perform(context) == "true":

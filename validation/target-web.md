@@ -50,11 +50,32 @@
 | `b601_target_web` | 展示 URDF、实测和目标姿态，提供 TCP 逆解、控制权、后端和刚度选择、补偿来源回读、归中与 Disable |
 | `b601_target_arbiter` | 整机只授予一个有效会话。确认会话、递增序号、有限值及关节限位后，向手臂和夹爪分别发布授权目标 |
 | `b601_target_bridge` | 调用现有 MIT 控制器的 `joint_target` 入口，按控制器消费序号匹配回执。来源失联或仲裁心跳中断时，以新鲜实测位置提交持位目标 |
+| `b601_tcp_primitives` | 规划基座坐标系 TCP 平移序列，显式执行时经同一 MIT 仲裁会话逐段发送并回读 |
 | `b601_mit_recenter` | 通过整机仲裁接管，按 J4 上抬、其余五轴归中、J4 回落执行，依据六轴实测及控制器回执完成归中 |
 
 客户端通过同一整机会话提交目标。`TargetFrame` 接受七关节位置、可选速度和任务前馈。`MitTargetFrame` 另可携带外部重力和摩擦补偿。控制器的采纳回执用于确认目标已经消费，位置误差和到位窗口用于确认运动完成。网页 Disable 需要最近一次归中回执及六轴仍在停放范围。执行期间仲裁会冻结新的会话申请，网页确认硬件进入 `inactive` 后退出后端。
 
 ## B601_experiments 扩展验收
+
+### 重力与 TCP 同会话复测
+
+`codex/tcp-primitives` 基于主工作区提交 `70daca2`。网页依次显示重力补偿、控制权、`base_link` 六向 TCP 点动与日志、逐关节指令。使用独立 DDS 域和本地 HTTP 端口运行以下回归。
+
+```bash
+source scripts/ros_env.sh && b601_source_workspace
+B601_TEST_ROS_DOMAIN_ID=169 python3 scripts/test_target_arbitration.py --tcp-primitives --http-port 8892
+B601_TEST_ROS_DOMAIN_ID=170 python3 scripts/test_target_arbitration.py --http-port 8893
+B601_TEST_ROS_DOMAIN_ID=172 python3 scripts/test_target_arbitration.py --physical --http-port 8895
+python3 scripts/test_load_feedback.py --domain 171
+```
+
+同一网页会话中，切换外部重力再点动，控制器的 J1 补偿仍回读为外部。切回内部后，七关节目标由两组控制器采纳，下一次 TCP 点动重新读取实测参考。日志入口显示当次 JSONL 路径，点动回执可在该文件内按转发编号查到。
+
+Chromium 通过网页连接物理 MuJoCo，由网页启动 MIT 控制器和 MoveIt。实际点击重力切换、向左点动 3 mm、读取夹爪外力并发送七关节目标，随后归中、失能、回到预览。 [连接后的网页](../.verify/merge-review/live-browser-complete/connected.png) · [浏览器结果](../.verify/merge-review/live-browser-complete/browser-result.json)
+
+默认与物理 MuJoCo 的仲裁测试分别通过 16 项和 8 项。夹爪负载专项核对默认关闭、显式启用和四位置回读。构建 10 个包，自检 34/34。测试仅使用仿真和反馈夹具。MoveIt 在原语回归结束后退出时复现已知段错误。
+
+[TCP 复测](../.verify/merge-review/tcp.log) · [默认场景](../.verify/merge-review/gravity.log) · [物理场景](../.verify/merge-review/physical.log) · [负载复测](../.verify/merge-review/load.log)
 
 ### v1.1.2 发布复测
 
@@ -81,6 +102,40 @@ python3 scripts/test_target_arbitration.py --http-port 18867
 隔离 MuJoCo 验证单条目标发出 0.65 秒后，重力来源继续使用外部，桥接器仍接收按实测姿态计算的新力矩。位置目标保持原转发编号。手动切内部后逐轴回读恢复。模拟 SDK 提供者停更时，控制器回到内部。恢复该提供者的更新后，无须重新选择就回到外部。隔离暂停桥接器也可触发控制器回退。摩擦与任务前馈的时效沿用原回归。
 
 独立网页此前已验证首组外部补偿可在发送运动目标前生效。本次用 Chromium 加入桥接器暂停与恢复，验证网页显示的逐轴实际来源和用户选择分别变化。实际高斯与夹爪 API 已同环境加载，实机持续切换待现场验证。
+
+### 网页六向 TCP 点动
+
+在隔离 MuJoCo 中，通过网页 Connect 自动启动 MoveIt 和 MIT 控制器。
+Chromium 核对 `base_link` 标记、六向轴符号、网页控制权和在途按钮状态。单击 5 mm 原语后，
+以关节回读正解核对 ±X、±Y、±Z 的方向。不可达目标未更新采纳编号，随后仍可提交普通七关节目标。
+桌面与窄屏均检查了按钮和位移反馈布局。离开页面后会话超时进入实测持位，随后隔离后端归中并 Disable。
+MoveIt 在仿真后端归中失能后退出时复现已知段错误。网页已回到空闲预览。
+
+[网页操作](../README.md#网页-tcp-点动) · [浏览器回读](../.verify/tcp-web-browser/results.json)
+
+### 网页连续 TCP 目标参考
+
+`B601_TEST_ROS_DOMAIN_ID=215 python3 scripts/test_target_arbitration.py --tcp-primitives --http-port 8892`
+通过 CLI 组合及网页同会话连续点动、不可达后保留基准、普通关节目标后重取实测基准。
+
+以 01:00:04.921 的真机关节反馈离线回放「前 20 mm」。起点 Z 为 277.57 mm，
+上一条目标 Z 为 291.36 mm，修正后规划终点 Z 为 291.36 mm。 [回放数值](../.verify/tcp-reference-replay/result.json)
+
+### TCP 平移原语组合
+
+`codex/tcp-primitives` 使用隔离的默认 MuJoCo MIT 场景和 MoveIt，初始 J5 为 0.3 rad。在 DDS 域 219 和 220 连续复测通过。
+[复测命令](../README.md#tcp-平移原语组合)
+
+| 检查 | 结果 |
+|---|---|
+| 单步输入与预览 | `forward 0.09` 参数校验失败，`forward 0.1` 生成两个轨迹点，预览未发目标 |
+| 方形组合 | 四段各 20 mm，反馈 FK 的主方向依次为 +X、+Y、−X、−Y。段末均有两组 MIT 回执，最终回到起点附近 |
+| 同向组合 | `forward 8 forward 12` 的两段反馈均沿 +X，完成后释放会话 |
+| 不可达的后续段 | `forward 5 left 1200` 的第二段仅完成约 10% 的规划，未转发任一段，且释放会话 |
+
+仿真结果用于核对规划和执行顺序。本轮未做实机运动或定位精度验收。
+MoveIt 在组合结束并保存结果后复现已知的 `move_group` 退出段错误，MuJoCo 后端与控制节点正常退出。
+[JSON 回读](../.verify/target-arbitration-219/tcp-primitives.json) · [MoveIt 日志](../.verify/target-arbitration-219/moveit.log)
 
 ### 上层重力 API 复测
 
@@ -253,3 +308,9 @@ ROS_DOMAIN_ID=158 ./scripts/start_target_web_external.sh port:=18878
 在 Web 中连接 MuJoCo「开启重力与碰撞」，核对 J2–J5 采用外部高斯重力，夹爪节点输出估计。发送 J1 小位移后核对两路控制器采纳，再依次归中、Disable 和退出。重复启动同配置时复用了原预览及日志。 [启动与文件说明](../README.md#外部-api-一键启动)
 
 本轮写入 2,072 条 JSONL 事件，覆盖网页操作、采纳、反馈、负载和补偿来源，并正常结束记录。MuJoCo 运行日志写入同一会话的 `ros/`。实机驱动 CSV 路径通过 xacro 参数核对，含空格和引号的路径也可正确传入。
+
+### TCP 工作区同步 `2eb5f80` 后复测
+
+普通入口与一键入口分别使用独立 ROS 域和端口启动。两种入口重复启动均复用原预览和日志路径。普通入口保留默认记录，一键入口在自己分配的目录内写入 JSONL 和 `ros/`。使用实际高斯重力与夹爪 API 在物理 MuJoCo 点动 3 mm，核对 J2–J5 外部重力、负载读数、点动回执与同一 JSONL 中的规划事件。随后归中、失能并正常结束记录。
+
+构建 10 包、自检 34/34，TCP 原语及网页同会话回归通过。独立原语测试结束时复现已知的 MoveIt 退出段错误。未连接实机。 [一键入口复测](../.verify/base-2eb5f80/smoke-retry.log) · [TCP 回归](../.verify/base-2eb5f80/tcp.log)

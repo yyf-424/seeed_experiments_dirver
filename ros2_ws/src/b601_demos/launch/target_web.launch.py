@@ -2,7 +2,6 @@
 
 from http.client import HTTPConnection, HTTPException
 import json
-import os
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
@@ -37,8 +36,7 @@ def preview_already_running(port, gravity_source, gravity_api, load_positions, l
                     if (load.get("positions", []), load.get("api", "")) != (list(load_positions), load_api):
                         raise RuntimeError(
                             f"端口 {port} 的控制台已用其他负载配置运行，请先结束该控制台或使用其他端口。")
-                    recording = state.get("recording_path")
-                    if bool(recording) != bool(os.environ.get("B601_WEB_RECORD_DIR")):
+                    if not state.get("recording_path"):
                         raise RuntimeError(
                             f"端口 {port} 的控制台已用其他日志设置运行，请先结束该控制台或使用其他端口。")
                     return state

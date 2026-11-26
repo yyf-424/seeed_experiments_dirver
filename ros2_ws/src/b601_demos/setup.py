@@ -11,7 +11,7 @@ setup(
         ("share/" + package_name, ["package.xml"]),
         ("share/" + package_name + "/launch", ["launch/target_web.launch.py"]),
         ("share/" + package_name + "/web", [
-            "web/index.html", "web/style.css", "web/app.js", "web/robot-view.js", "web/tcp-ik.js",
+            "web/index.html", "web/style.css", "web/app.js", "web/robot-view.js", "web/tcp-ik.js", "web/session-heartbeat.js",
         ]),
         ("share/" + package_name + "/web/vendor", [
             "web/vendor/three.module.min.js", "web/vendor/OrbitControls.js",
@@ -41,6 +41,7 @@ setup(
             "mit_recenter = b601_demos.mit_recenter:main",
             "mit_recenter_call = b601_demos.mit_recenter_client:main",
             "mit_trajectory = b601_demos.mit_trajectory:main",
+            "tcp_primitives = b601_demos.tcp_primitives:main",
         ],
     },
 )

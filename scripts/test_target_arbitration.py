@@ -8,6 +8,8 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from threading import Event, Thread
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import yaml
@@ -725,7 +727,171 @@ def test_stiffness_switching(node, enabled, port=None):
     print(f"PASS MIT startup switch {enabled}: joint1 Kp {high} → {low if enabled else high}")
 
 
-def start_fixture(output, web, physical=False, *, port=8765, stiffness_switching="auto"):
+def test_web_tcp_reference(node, port):
+    def request(path, payload=None):
+        data = json.dumps(payload).encode() if payload is not None else None
+        with urlopen(Request(f"http://127.0.0.1:{port}/api/{path}", data=data,
+                             headers={"Content-Type": "application/json"}), timeout=20) as response:
+            return json.load(response)
+
+    node.until(lambda: request("state")["tcp_jog"]["ready"], "web TCP service must be ready")
+    node.set_gravity_enabled(True)
+    session = request("select", {})
+    token = {"session_id": session["session_id"]}
+    stop = Event()
+
+    def heartbeat():
+        while not stop.is_set():
+            request("heartbeat", token)
+            stop.wait(0.08)
+
+    thread = Thread(target=heartbeat)
+    thread.start()
+    try:
+        node.until(lambda: request("state")["status"]["session"] == session["session"],
+                   "web authority must be visible")
+        seq = 1
+
+        def jog(direction, distance):
+            nonlocal seq
+            reply = request("tcp_jog", {**token, "session": session["session"], "sequence": seq,
+                                        "direction": direction, "distance_mm": distance})
+            seq = reply["sequence"] + 1
+            return reply
+
+        first = jog("forward", 8.0)
+        assert first["reference_source"] == "feedback", first
+        assert request("gravity_source", {"source": "external"})["accepted"]
+        node.until(lambda: request("state")["gravity_selection"]["effective"] == "external",
+                   "gravity switching must remain available during the TCP session")
+        try:
+            jog("left", 1200.0)
+        except HTTPError as error:
+            assert error.code == 409
+        else:
+            raise AssertionError("unreachable TCP target was accepted")
+        second = jog("left", 8.0)
+        assert second["reference_source"] == "previous_tcp_goal", second
+        assert second["reference_xyz_mm"] == first["goal_xyz_mm"], second
+        x, y, z = first["goal_xyz_mm"]
+        assert second["goal_xyz_mm"][0] == x and second["goal_xyz_mm"][2] == z, second
+        assert abs(second["goal_xyz_mm"][1] - y - 8.0) < 1e-9, second
+
+        def joint1_gravity_is(source):
+            sources = request("state")["compensation_sources"] or {}
+            return sources.get("gravity", {}).get("joint1") == source
+
+        node.until(lambda: joint1_gravity_is("external"), "TCP target must retain external gravity")
+        assert request("gravity_source", {"source": "internal"})["accepted"]
+        node.until(lambda: joint1_gravity_is("internal"),
+                   "gravity must return to internal in the same TCP session")
+        positions = request("state")["status"]["last_forwarded"]["position"]
+        positions["joint1"] += 0.02
+        direct = request("target", {**token, "sequence": seq, "positions": positions})
+        seq += 1
+        node.applied(direct["dispatch_id"])
+        third = jog("right", 5.0)
+        assert third["reference_source"] == "feedback", third
+        recording = Path(request("state")["tcp_jog"]["recording_path"])
+
+        def recorded():
+            with recording.open() as stream:
+                lines = stream.readlines()
+            events = [json.loads(line) for line in lines if line.endswith("\n")]
+            return any(event["event"] == "web_result" and event["path"] == "/api/tcp_jog"
+                       and event["payload"].get("dispatch_id") == second["dispatch_id"]
+                       for event in events)
+
+        node.until(recorded, "TCP result must appear in the visible log file")
+    finally:
+        stop.set()
+        thread.join()
+        request("release", token)
+    print("PASS web TCP references, log recording, gravity switching and joint commands share one session")
+
+
+def test_tcp_primitives(node, output, http_port=None):
+    cli_log = output / "tcp-primitives.log"
+    cli_log.write_text("")
+    with (output / "moveit.log").open("w") as stream:
+        moveit = subprocess.Popen([
+            "ros2", "launch", "b601_moveit_config", "move_group.launch.py",
+            "hardware:=mujoco", "use_rviz:=false",
+        ], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        node.until(lambda: node.status.get("feedback_ready") and ARM in node.controller_state
+                   and node.safety in (DiagnosticStatus.OK, DiagnosticStatus.WARN),
+                   "MuJoCo MIT must be ready")
+        original = node.status["last_forwarded"]
+
+        def run(*args, error=None):
+            result = subprocess.run(
+                ["ros2", "run", "b601_demos", "tcp_primitives", *args],
+                text=True, capture_output=True, timeout=60,
+            )
+            with cli_log.open("a") as log:
+                log.write(f"{' '.join(args)}\n{result.stdout}{result.stderr}\n")
+            if error is None:
+                assert result.returncode == 0, (args, result.stdout, result.stderr)
+            else:
+                assert result.returncode != 0 and error in result.stderr, (args, result.stderr)
+            return [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+
+        run("forward", "0.09", error="至少 0.1 mm")
+        preview = run("forward", "0.1")
+        assert [row["event"] for row in preview] == ["start", "planned"], preview
+        start, target = preview[0]["measured_xyz_mm"], preview[1]["target_xyz_mm"]
+        assert abs(target[0] - start[0] - 0.1) < 1e-9 and target[1:] == start[1:], preview
+        run("--execute", "forward", "5", "left", "1200", error="第 2 段")
+        node.until(lambda: node.status.get("source") is None
+                   and node.status.get("last_event", {}).get("message") == "released",
+                   "failed plan must release its session")
+        assert node.status["last_forwarded"] == original, node.status
+        print("PASS 0.1 mm preview and whole-sequence rejection before dispatch")
+
+        square = run("--execute", "forward", "20", "left", "20", "backward", "20", "right", "20")
+        steps = [row for row in square if row["event"] == "executed"]
+        assert [row["direction"] for row in steps] == ["forward", "left", "backward", "right"], steps
+        for row, axis, sign in zip(steps, (0, 1, 0, 1), (1, 1, -1, -1)):
+            delta = row["delta_xyz_mm"]
+            assert sign * delta[axis] > max(abs(v) for i, v in enumerate(delta) if i != axis), row
+        initial = square[0]["measured_xyz_mm"]
+
+        def distance_from_start(row):
+            return sum((a - b)**2 for a, b in zip(initial, row["measured_xyz_mm"]))
+
+        assert distance_from_start(steps[-1]) < min(map(distance_from_start, steps[:-1])), steps
+        print("PASS four directions in order, both MIT groups acknowledged, endpoint returned toward start")
+
+        repeat = run("--execute", "forward", "8", "forward", "12")
+        measured = [row for row in repeat if row["event"] == "executed"]
+        assert len(measured) == 2 and all(row["delta_xyz_mm"][0] > 0 for row in measured), repeat
+        node.until(lambda: node.status.get("source") is None
+                   and node.status.get("last_event", {}).get("message") == "released"
+                   and node.status.get("last_applied_id") == measured[-1]["dispatch_id"],
+                   "successful sequence must acknowledge the last dispatch and release its session")
+        print("PASS repeated primitives accumulate and one execution returns the control lease")
+
+        vertical = run("--execute", "up", "8", "down", "8")
+        steps = [row for row in vertical if row["event"] == "executed"]
+        assert [row["direction"] for row in steps] == ["up", "down"], steps
+        for row, sign in zip(steps, (1, -1)):
+            dx, dy, dz = row["delta_xyz_mm"]
+            assert sign * dz > max(abs(dx), abs(dy)), row
+        (output / "tcp-primitives.json").write_text(json.dumps(
+            {"preview": preview, "square": square, "repeat": repeat, "vertical": vertical},
+            indent=2) + "\n")
+        print("PASS up and down follow the base Z axis")
+        if http_port:
+            test_web_tcp_reference(node, http_port)
+    finally:
+        if moveit.poll() is None:
+            moveit.send_signal(signal.SIGINT)
+            moveit.wait(timeout=15)
+
+
+def start_fixture(output, web, physical=False, *, port=8765, stiffness_switching="auto",
+                  initial_joints=None):
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(Path(__file__).parent), env.get("PYTHONPATH")]))
     gravity_args = [f"target_web_gravity_api:={GRAVITY_API}"] if web else []
@@ -747,6 +913,7 @@ def start_fixture(output, web, physical=False, *, port=8765, stiffness_switching
                               "joint4": 0.0, "joint5": 0.0, "joint6": 0.0,
                               "finger_left": 0.015, "finger_right": -0.015},
     }
+    initial["initial_positions"].update(initial_joints or {})
     initial_path = output / "initial.yaml"
     initial_path.write_text(yaml.safe_dump(initial))
     config = yaml.safe_load((source / "b601_bringup/config/b601_mit_controllers.yaml").read_text())
@@ -776,6 +943,7 @@ def main():
     mode.add_argument("--stiffness-switching", choices=("true", "false"),
                       help="验证显式软硬刚度启动选项及实际增益")
     parser.add_argument("--http-port", type=int, help="在指定本地端口启动网页并验证 HTTP 和 CLI")
+    mode.add_argument("--tcp-primitives", action="store_true", help="验证基座 TCP 原语组合")
     args = parser.parse_args()
     os.environ["ROS_LOCALHOST_ONLY"] = "1"
     domain = os.environ.get("B601_TEST_ROS_DOMAIN_ID", "227")
@@ -797,6 +965,7 @@ def main():
         process = start_fixture(
             output, args.web or args.http_port is not None, args.physical,
             port=args.http_port or 8765, stiffness_switching=args.stiffness_switching or "auto",
+            initial_joints={"joint5": 0.3} if args.tcp_primitives else None,
         )
         if args.web:
             node.until(lambda: node.status.get("feedback_ready"),
@@ -806,6 +975,8 @@ def main():
                 rclpy.spin_once(node, timeout_sec=0.1)
             if process.poll() not in (None, 0):
                 raise RuntimeError(f"MuJoCo launch failed, see {output / 'launch.log'}")
+        elif args.tcp_primitives:
+            test_tcp_primitives(node, output, args.http_port)
         elif args.physical:
             test_physical_recenter(node, args.http_port)
         elif args.stiffness_switching:

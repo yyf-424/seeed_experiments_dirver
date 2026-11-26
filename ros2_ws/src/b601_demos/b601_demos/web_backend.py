@@ -24,9 +24,10 @@ MUJOCO_SCENES = ("free", "physical")
 STIFFNESS_SETTINGS = ("auto", "true", "false")
 
 
-def bringup_command(backend, project_file, mujoco_scene="free", stiffness_switching="auto", *, dm_log_csv=None):
+def bringup_command(backend, project_file, mujoco_scene="free", stiffness_switching="auto",
+                    *, dm_log_csv=None):
     args = [
-        "ros2", "launch", "b601_bringup", "bringup.launch.py",
+        "ros2", "launch", "b601_moveit_config", "web_backend.launch.py",
         f"hardware:={backend}", "dm_command_mode:=mit_impedance",
         "use_rviz:=false", "use_safety:=true", "use_target_web:=false",
         "mit_recenter_on_startup:=false",
@@ -50,6 +51,7 @@ class WebBackend:
         self.node = node
         self.project_file = project_file
         self.recording_dir = recording_dir
+        self.dm_log_csv = None
         self.attached = attached
         self.mujoco_scene = attached_mujoco_scene or None
         self.stiffness_switching = attached_stiffness_switching or None
@@ -219,11 +221,11 @@ class WebBackend:
             output = stack.enter_context(NamedTemporaryFile(
                 prefix=f"b601-web-{backend}-", suffix=".log", dir=directory, delete=False))
             self.log_path = Path(output.name)
-            dm_log_csv = self.recording_dir / f"dm-feedback-{time_ns()}.csv" if (
+            self.dm_log_csv = self.recording_dir / f"dm-feedback-{time_ns()}.csv" if (
                 self.recording_dir and backend == "dm") else None
             return subprocess.Popen(
                 bringup_command(backend, self.project_file, mujoco_scene, stiffness_switching,
-                                dm_log_csv=dm_log_csv),
+                                dm_log_csv=self.dm_log_csv),
                 start_new_session=True,
                 env={**os.environ, "ROS_DOMAIN_ID": str(domain)},
                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,

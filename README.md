@@ -524,6 +524,70 @@ dispatch_id = client.set_joint_deltas({"joint2": -0.02, "joint4": 0.03}, timeout
 
 HTTP `POST /api/delta_target` 接收 `session_id`、递增的 `sequence` 和按关节名索引的 `deltas`。成功响应包含 `dispatch_id` 和合成后的 `positions`。反馈不齐或过期时上层拒绝计算。绝对目标沿用既有位置范围校验。
 
+### TCP 平移原语组合
+
+`codex/tcp-primitives` 提供 `ros2 run b601_demos tcp_primitives`。在 `base_link` 下定义六个方向。
+`forward` / `backward` 对应 ±X，`left` / `right` 对应 ±Y，`up` / `down` 对应 ±Z。
+每个方向后跟距离（mm），最小输入为 0.1 mm。组合从当时的关节反馈求出 `end_link` 位姿，依次叠加同一基座系中的位移，每段保持起始工具姿态。
+
+在已运行 MoveIt 的同一 ROS 域内加载当前工作区。默认只规划并输出各段目标。
+
+```bash
+source scripts/ros_env.sh && b601_source_workspace
+ros2 run b601_demos tcp_primitives forward 0.1
+ros2 run b601_demos tcp_primitives forward 20 left 20 backward 20 right 20
+```
+
+在已运行的隔离 MuJoCo MIT 会话中可显式执行。控制权空闲时使用 `tcp_primitives` 来源。
+命令先规划完整组合，再经同一个整机目标会话依次发送各段采样点，维持起始夹爪开度目标。
+每段完成发送后等待两组控制器回执和既有稳定等待时间，再输出关节反馈推算的 TCP 位移。
+
+```bash
+ros2 run b601_demos tcp_primitives --execute forward 20 left 20 backward 20 right 20
+```
+
+下面的隔离回归自行启动 MoveIt 和 MuJoCo，覆盖预览、四方向、同方向叠加和整组规划失败。
+
+```bash
+./scripts/build.sh
+source scripts/ros_env.sh && b601_source_workspace
+B601_TEST_ROS_DOMAIN_ID=219 python3 scripts/test_target_arbitration.py --tcp-primitives
+```
+
+回读保存在 `.verify/target-arbitration-219/tcp-primitives.json`。
+0.1 mm 是命令下限。本轮测量基于仿真关节回读，实机运动和精度尚未验收。
+[复测记录](validation/target-web.md#tcp-平移原语组合)
+
+### 网页 TCP 点动
+
+在控制台取得网页控制权后，填写「位移（mm）」并点击「TCP 点动」中的方向按钮。
+面板显示 `base_link` 及每个方向的轴符号。每次点击执行一个原语，MoveIt 从最新实测关节位规划。
+同一网页会话连续点动会以最后一条已采纳的 TCP 目标为参考，只累加所选轴，并保持目标工具姿态。
+第一次点动、换会话或发出普通关节目标后的第一次点动，以当前实测 TCP 初始化。
+完成后显示反馈推算的 ΔXYZ，夹爪目标沿用点动起点的开度。
+
+通过网页连接 MuJoCo 或实机时，托管启动会带上用于规划的 MoveIt。
+若网页附着到独立启动的后端，点动使用同一 ROS 域内的 MoveIt，可用
+`ros2 launch b601_moveit_config move_group.launch.py hardware:=mujoco use_rviz:=false allow_trajectory_execution:=false`
+启动 MuJoCo 模型对应的规划服务。面板显示服务是否就绪。
+HTTP `POST /api/tcp_jog` 接收当前网页 `session_id`、公开 `session`、起始 `sequence`、
+`direction` 和 `distance_mm`。调用方按响应中的 `sequence` 继续递增发令。
+[验收](validation/target-web.md#网页六向-tcp-点动)
+
+### 点动复测记录
+
+从工作树运行下面的命令启动控制台。连接后端和点动仍由网页操作。
+
+```bash
+ROS_DOMAIN_ID=217 ROS_LOCALHOST_ONLY=1 ./scripts/start_target_web.sh port:=8876
+```
+
+网页按重力补偿、控制权、TCP 点动与日志、关节指令的顺序排列。TCP 区域的「操作与反馈日志」可展开查看本次文件，终端也会打印 `.verify/web-recordings/<会话>/events.jsonl` 的绝对路径。记录包括网页请求与响应、TCP 点动前后显示的目标、带时间戳的关节位置与速度/力矩、仲裁目标和控制器采纳回执。完成的点动保存 `goal_xyz_mm`、`measured_xyz_mm`、`terminal_error_mm` 和 `terminal_squared_error_mm2`。最大值取各次 `terminal_error_mm` 的最大，MSE 取各次 `terminal_squared_error_mm2` 的平均。
+
+普通启动自动创建会话目录，外部 API 一键启动将 JSONL 和 ROS 日志放在同一会话目录。两种入口都用 `B601_WEB_LOG_ROOT` 指定日志根目录。直接设置 `B601_WEB_RECORD_DIR` 时，网页使用指定目录作为本次会话目录。
+
+网页每次连接实机，还会在同一会话目录写 `dm-feedback-*.csv`，沿用驱动的 200 Hz 记录配置，保存原始电机反馈和下发参考。通过网页归中和 Disable 后关闭控制台，便于完整保留尾部数据。外部启动的驱动仍可用 `dm_log_csv:=<绝对路径>` 指定硬件 CSV。
+
 ### 外部重力与摩擦前馈
 
 `gravity_ff` 和 `friction_ff` 各自接受按关节名索引的最终补偿量，手臂用 N·m，主动夹爪用 N。每个关节分别选择外部重力、摩擦或对应的内部项，再加 `tff`。显式传 `0.0` 会把该项设为零。位置帧中的 `gravity_ff` 可显式更新所列关节的外部重力。各轴按自己的最近样本判定时效，使用现有的 `safety.feedback_timeout_sec`（默认 0.3 秒）。摩擦覆盖与 `tff` 仍使用 `task_torque_timeout_sec`（默认 0.5 秒），新帧省略摩擦时回到内部摩擦。缩放与偏置作用于内部项。

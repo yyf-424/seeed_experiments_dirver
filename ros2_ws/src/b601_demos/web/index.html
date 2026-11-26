@@ -106,6 +106,31 @@
             <div><dt>最近目标回执</dt><dd id="applied">—</dd></div>
           </dl>
         </section>
+        <section class="tcp-jog" aria-labelledby="tcp-jog-title">
+          <div class="tcp-jog-head">
+            <div>
+              <h2 id="tcp-jog-title">TCP 点动</h2>
+              <p class="tcp-frame">基座坐标系 <code>base_link</code></p>
+            </div>
+            <label class="tcp-step" for="tcp-distance">
+              位移（mm）
+              <input id="tcp-distance" type="number" value="5" min="0.1" step="any" required disabled>
+            </label>
+          </div>
+          <div class="tcp-directions" aria-label="基座六向 TCP 平移">
+            <button type="button" class="quiet" data-tcp-direction="forward" disabled>前 <span>+X</span></button>
+            <button type="button" class="quiet" data-tcp-direction="left" disabled>左 <span>+Y</span></button>
+            <button type="button" class="quiet" data-tcp-direction="up" disabled>上 <span>+Z</span></button>
+            <button type="button" class="quiet" data-tcp-direction="backward" disabled>后 <span>−X</span></button>
+            <button type="button" class="quiet" data-tcp-direction="right" disabled>右 <span>−Y</span></button>
+            <button type="button" class="quiet" data-tcp-direction="down" disabled>下 <span>−Z</span></button>
+          </div>
+          <p id="tcp-jog-status" class="tcp-jog-status" role="status"></p>
+          <details id="tcp-recording" class="tcp-recording" hidden>
+            <summary>操作与反馈日志</summary>
+            <code id="tcp-recording-path"></code>
+          </details>
+        </section>
         <div class="joint-header">
           <h2 id="joints-title">实测与关节目标</h2>
           <div class="joint-actions">

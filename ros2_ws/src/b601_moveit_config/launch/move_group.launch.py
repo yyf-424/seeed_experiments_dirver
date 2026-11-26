@@ -17,6 +17,8 @@ def generate_launch_description():
         DeclareLaunchArgument("trajectory_mode", default_value="auto",
                               choices=["auto", "mit_impedance", "pos_vel"]),
         DeclareLaunchArgument("start_mit_trajectory", default_value="true", choices=["true", "false"]),
+        DeclareLaunchArgument("allow_trajectory_execution", default_value="true",
+                              choices=["true", "false"]),
         DeclareLaunchArgument("use_rviz", default_value="true"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         OpaqueFunction(function=launch_moveit),

@@ -10,6 +10,9 @@ const stiffnessSwitchingSelect = element("stiffness-switching");
 const connectButton = element("connect");
 const disableButton = element("disable");
 const recenterButton = element("recenter");
+const tcpDistance = element("tcp-distance");
+const tcpButtons = document.querySelectorAll("[data-tcp-direction]");
+const tcpLabels = { forward: "前", backward: "后", left: "左", right: "右", up: "上", down: "下" };
 const stiffnessLabels = { high: "高刚度", low: "低刚度" };
 const loadSites = new Map([["gripper", "夹爪"], ["upper_arm", "大臂"], ["forearm", "小臂"], ["wrist", "腕部"]]);
 const loadStatuses = new Map([
@@ -24,6 +27,7 @@ const sourceLabels = new Map([
   ["web", "网页"], ["policy", "外部策略"], ["external", "外部接口"], ["recenter", "归中"],
 ]);
 let session;
+const heartbeat = new Worker("/session-heartbeat.js");
 let shownBackend;
 let stiffnessSelectionInitialized = false;
 let backendReply;
@@ -32,8 +36,11 @@ const edited = new Set();
 let snapshot = { feedback: {}, limits: {} };
 let busy = false;
 let recenterPending = false;
+let tcpPending = false;
+let tcpReply;
 let robotView;
 let displayedLoad;
+let displayedTcpTarget;
 
 function sourceLabel(source) {
   return sourceLabels.get(source) || source || "无";
@@ -45,7 +52,7 @@ function refreshRobotView() {
   const forwarded = state?.last_forwarded;
   const target = { ...(!state?.holding_after_loss && forwarded?.position) };
   let label = forwarded?.source === "recenter" ? "归中目标" : "最近下发目标";
-  if (!recenterPending && state?.source !== "recenter") {
+  if (!recenterPending && !tcpPending && state?.source !== "recenter") {
     for (const name of edited) {
       const input = rows.get(name).number;
       if (Number.isFinite(input.valueAsNumber) && input.checkValidity()) {
@@ -54,6 +61,7 @@ function refreshRobotView() {
       }
     }
   }
+  displayedTcpTarget = { label, dispatch_id: forwarded?.dispatch_id, positions: target };
   robotView.update({
     feedback: snapshot.feedback, target, label, online: !!snapshot.status,
     armJoints: state?.joints, limits: snapshot.limits,
@@ -267,11 +275,66 @@ async function changeBackend(path, payload) {
   }
 }
 
+function refreshTcp(ready, allowed) {
+  const jog = snapshot.tcp_jog;
+  const available = allowed && jog?.ready;
+  for (const button of tcpButtons) button.disabled = !available;
+  tcpDistance.disabled = busy || !ready;
+  if (jog) tcpDistance.min = jog.min_distance_mm;
+  const recording = element("tcp-recording");
+  const recordingPath = jog?.recording_path || "";
+  recording.hidden = !recordingPath;
+  const recordingOutput = element("tcp-recording-path");
+  if (recordingOutput.textContent !== recordingPath) recordingOutput.textContent = recordingPath;
+  const output = element("tcp-jog-status");
+  const message = tcpPending || tcpReply?.error ? tcpReply?.message
+    : !ready ? "连接后端后可点动。"
+    : !jog?.planner_ready ? "等待 MoveIt 规划服务。"
+    : !jog.ready ? "等待 MIT 控制器、关节反馈和安全状态。"
+    : !session || snapshot.status?.session !== session.publicId ? "请先指定网页控制权。"
+    : tcpReply?.message || "点击执行一步，保持工具姿态。";
+  output.dataset.error = String(!!tcpReply?.error);
+  if (output.textContent !== message) output.textContent = message;
+}
+
+async function jogTcp(direction) {
+  if (!tcpDistance.reportValidity()) return;
+  const current = session;
+  const distance = tcpDistance.valueAsNumber;
+  const label = tcpLabels[direction];
+  const viewBefore = displayedTcpTarget;
+  const sequence = ++current.sequence;
+  let dispatchId;
+  tcpPending = true;
+  tcpReply = { message: `正在向${label}点动 ${distance} mm…` };
+  refresh();
+  try {
+    const result = await api("/api/tcp_jog", {
+      session_id: current.id, session: current.publicId, sequence,
+      direction, distance_mm: distance, view_before: viewBefore,
+    });
+    current.sequence = Math.max(current.sequence, result.sequence);
+    dispatchId = result.dispatch_id;
+    const delta = result.delta_xyz_mm.map((value) => value.toFixed(2));
+    tcpReply = { message: `向${label}完成 · 回读 ΔXYZ（mm）${delta.join(" / ")}` };
+  } catch (error) {
+    if (Number.isInteger(error.sequence)) current.sequence = Math.max(current.sequence, error.sequence);
+    tcpReply = { error: true, message: error.message };
+  } finally {
+    tcpPending = false;
+    refresh();
+    api("/api/tcp_view", {
+      session: current.publicId, sequence, dispatch_id: dispatchId, view_after: displayedTcpTarget,
+    }).catch(() => {});
+  }
+}
+
 function refresh() {
   const state = snapshot.status;
   const ready = snapshot.backend?.phase === "connected";
   const allowed = !busy && ready && !!session && state?.session === session.publicId;
   refreshBackend();
+  refreshTcp(ready, allowed);
   element("authority").textContent = sourceLabel(state?.authority);
   element("source").textContent = sourceLabel(state?.source);
   element("age").textContent = snapshot.feedback_age_ms === null || snapshot.feedback_age_ms === undefined
@@ -306,7 +369,11 @@ async function poll() {
     const state = snapshot.status;
     if (session && state) {
       if (state.session === session.publicId) session.observed = true;
-      else if (session.observed) session = undefined;
+      else if (session.observed) setSession(undefined);
+    }
+    const last = state?.last_forwarded;
+    if (session && last?.session === session.publicId) {
+      session.sequence = Math.max(session.sequence, last.sequence);
     }
     if (state?.joints && state.joints.join() !== [...rows.keys()].join()) makeRows(state.joints);
     refresh();
@@ -334,25 +401,23 @@ async function api(path, payload) {
   if (!response.ok) {
     const error = new Error(result.message);
     error.status = response.status;
+    error.sequence = result.sequence;
     throw error;
   }
   return result;
 }
 
-function renewSession() {
-  const current = session;
-  if (current && !current.renewing) {
-    current.renewing = true;
-    api("/api/heartbeat", { session_id: current.id }).catch((error) => {
-      if (error.status === 409 && session === current) {
-        session = undefined;
-        if (!busy) notice("网页控制权已失效，可重新指定网页。", true);
-        refresh();
-      }
-    }).finally(() => { current.renewing = false; });
-  }
-  window.setTimeout(renewSession, snapshot.heartbeat_period_ms || 100);
+function setSession(next) {
+  session = next;
+  heartbeat.postMessage(next ? { id: next.id, period: snapshot.heartbeat_period_ms || 100 } : null);
 }
+
+heartbeat.addEventListener("message", ({ data }) => {
+  if (session?.id !== data.lost) return;
+  setSession(undefined);
+  if (!busy) notice("网页控制权已失效，可重新指定网页。", true);
+  refresh();
+});
 
 async function mutate(task) {
   if (busy) return;
@@ -435,17 +500,17 @@ element("acquire").addEventListener("click", () => mutate(async () => {
   if (source === "web") {
     if (!session || session.publicId !== snapshot.status?.session) {
       const reply = await api("/api/select", {});
-      session = { id: reply.session_id, publicId: reply.session, sequence: 0 };
+      setSession({ id: reply.session_id, publicId: reply.session, sequence: 0 });
     }
     notice("网页已取得整机控制权。");
   } else {
-    session = undefined;
+    setSession(undefined);
     notice(`已指定 ${sourceLabel(source)}，该来源可申请整机控制权。`);
   }
 }));
 element("release").addEventListener("click", () => mutate(async () => {
   await api("/api/authority", { source: "" });
-  session = undefined;
+  setSession(undefined);
   notice("已释放整机控制权。");
 }));
 recenterButton.addEventListener("click", () => mutate(async () => {
@@ -470,8 +535,11 @@ element("sync").addEventListener("click", () => {
   }
   refresh();
 });
+for (const button of tcpButtons) {
+  button.addEventListener("click", () => mutate(() => jogTcp(button.dataset.tcpDirection)));
+}
 element("send-all").addEventListener("click", () => mutate(sendTargets));
-window.addEventListener("pagehide", () => { session = undefined; });
+window.addEventListener("pagehide", () => setSession(undefined));
 import("/robot-view.js").then(({ createRobotView }) => {
   robotView = createRobotView(element("robot-view"), applyTcpDraft);
   refreshRobotView();
@@ -479,4 +547,3 @@ import("/robot-view.js").then(({ createRobotView }) => {
   element("model-status").textContent = `三维渲染不可用：${error.message}`;
 });
 poll();
-renewSession();

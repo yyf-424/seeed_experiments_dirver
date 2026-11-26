@@ -46,7 +46,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction, RegisterEventHandler, SetLaunchConfiguration
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit, OnShutdown
-from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import AndSubstitution, Command, LaunchConfiguration, NotEqualsSubstitution, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
@@ -78,6 +78,11 @@ def generate_launch_description():
     mujoco_scene = LaunchConfiguration("mujoco_scene")
     use_target_web = LaunchConfiguration("use_target_web")
     target_web_port = LaunchConfiguration("target_web_port")
+    target_web_load_api = LaunchConfiguration("target_web_load_api")
+    target_web_load_params = {
+        "load_api": ParameterValue(target_web_load_api, value_type=str),
+        "load_positions": ParameterValue(LaunchConfiguration("target_web_load_positions"), value_type=str),
+    }
     use_rviz = LaunchConfiguration("use_rviz")
     use_safety = LaunchConfiguration("use_safety")
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -282,10 +287,18 @@ def generate_launch_description():
             ),
             Node(
                 package="b601_demos",
+                executable="load_node",
+                output="screen",
+                condition=IfCondition(AndSubstitution(use_target_web, NotEqualsSubstitution(target_web_load_api, ""))),
+                parameters=[{"project_config_file": project_config_file, **target_web_load_params}],
+            ),
+            Node(
+                package="b601_demos",
                 executable="target_web",
                 output="screen",
                 condition=IfCondition(use_target_web),
                 parameters=[{
+                    **target_web_load_params,
                     "project_config_file": project_config_file,
                     "port": ParameterValue(target_web_port, value_type=int),
                     "gravity_source": ParameterValue(
@@ -366,6 +379,11 @@ def generate_launch_description():
                 "target_web_gravity_source", default_value="internal", choices=["internal", "external"],
             ),
             DeclareLaunchArgument("target_web_gravity_api", default_value=""),
+            DeclareLaunchArgument(
+                "target_web_load_api", default_value="",
+                description="Load Python module:factory (empty disables load feedback)",
+            ),
+            DeclareLaunchArgument("target_web_load_positions", default_value="gripper"),
             DeclareLaunchArgument(
                 "mit_recenter_gravity_source", default_value="internal", choices=["internal", "external"],
             ),

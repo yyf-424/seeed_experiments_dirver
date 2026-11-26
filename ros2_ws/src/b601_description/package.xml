@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>b601_description</name>
-  <version>1.1.1</version>
+  <version>1.1.2</version>
   <description>
     B601-DM 六轴机械臂 + 平行夹爪的机器人描述（xacro / URDF）与 ros2_control 配置。
     整个示例项目的“唯一真值来源”：RViz、MoveIt、MuJoCo、真机驱动都从这里取模型。

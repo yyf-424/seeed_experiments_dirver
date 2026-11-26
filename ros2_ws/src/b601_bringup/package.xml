@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>b601_bringup</name>
-  <version>1.1.1</version>
+  <version>1.1.2</version>
   <description>
     B601 的启动包：把 robot_description、ros2_control、controller 依次拉起来。
     所有“后端差异”（mock / 真机 / MuJoCo）都收敛到一个 hardware 参数里。

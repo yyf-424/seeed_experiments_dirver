@@ -54,9 +54,9 @@ class TargetWeb(Node):
         robot = config["robot"]
         self.joints = (*robot["arm_joints"], robot["gripper_joint"])
         self.gravity = GravityProvider(self, self.joints, self.feedback_timeout)
-        load_positions = self.declare_parameter("load_positions", "").value
-        self.load_positions = parse_load_positions(load_positions) if load_positions else ()
         self.load_api = self.declare_parameter("load_api", "").value
+        load_positions = self.declare_parameter("load_positions", "gripper").value
+        self.load_positions = parse_load_positions(load_positions) if self.load_api else ()
         self.load_sample = None
         self.compensation_samples = {}
         self.status = None
@@ -83,7 +83,8 @@ class TargetWeb(Node):
             DynamicJointState, "/dynamic_joint_states", self.on_stiffness_feedback, qos_profile_sensor_data)
         self.create_subscription(
             Bool, "/b601_mit_arm/soft_stiffness", self.on_sim_stiffness, qos_profile_sensor_data)
-        self.create_subscription(LoadEstimates, LOAD_TOPIC, self.on_load, qos_profile_sensor_data)
+        if self.load_api:
+            self.create_subscription(LoadEstimates, LOAD_TOPIC, self.on_load, qos_profile_sensor_data)
         for controller in config["controllers"]["mit"]["instances"]:
             self.create_subscription(
                 CompensationSources, f"/{controller}/compensation_sources",
@@ -120,18 +121,18 @@ class TargetWeb(Node):
         self.load_sample = (time.monotonic(), load_snapshot(message))
 
     def load_state(self, now):
+        if not self.load_api:
+            return None
         sample = self.load_sample
         if sample is not None and now - sample[0] <= self.feedback_timeout:
             data = sample[1]
         else:
             sites = {name: LOAD_SITES[name] for name in self.load_positions}
             data = load_snapshot(load_estimates(sites, {}, "waiting_node"))
-        configured = self.load_positions
         estimates = data["estimates"]
         return {
-            **data, "api": self.load_api, "positions": list(configured or estimates),
-            "estimates": {name: estimates[name] for name in configured if name in estimates}
-            if configured else estimates,
+            **data, "api": self.load_api, "positions": list(self.load_positions),
+            "estimates": {name: estimates[name] for name in self.load_positions if name in estimates},
         }
 
     def on_compensation_sources(self, controller, message):

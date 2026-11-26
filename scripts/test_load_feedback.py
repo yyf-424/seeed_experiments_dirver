@@ -23,7 +23,7 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 import xacro
 
-from b601_demos.load_api import LOAD_FRAME, LOAD_SITES, LOAD_TOPIC, LoadReading, load_snapshot
+from b601_demos.load_api import DEFAULT_LOAD_API, LOAD_FRAME, LOAD_SITES, LOAD_TOPIC, LoadReading, load_snapshot
 from b601_target_interfaces.msg import LoadEstimates
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,7 +141,18 @@ def web_read(address, path):
 
 def check(node):
     node.description.publish(String(data=node.urdf))
-    with run_console() as server:
+    for options in ((), ("load_positions:=wrist",)):
+        with run_console(*options) as server:
+            node.wait_for(lambda: "load" in web_read(server, "/api/state"))
+            assert web_read(server, "/api/state")["load"] is None
+            assert web_read(server, "/api/load") is None
+            assert not node.tare.service_is_ready()
+            assert not node.get_publishers_info_by_topic(LOAD_TOPIC)
+            assert all(info.node_name != "b601_target_web"
+                       for info in node.get_subscriptions_info_by_topic(LOAD_TOPIC))
+    print("load feedback disabled without an explicit API", flush=True)
+
+    with run_console(f"load_api:={DEFAULT_LOAD_API}") as server:
         node.wait_for(lambda: node.status_is("gripper", "uncalibrated") and node.tare.service_is_ready())
         result = node.tare.call_async(Trigger.Request())
         node.wait_for(result.done)
@@ -166,7 +177,7 @@ def check(node):
         np.testing.assert_allclose(reading["direction"], node.load / np.linalg.norm(node.load), atol=0.01)
         np.testing.assert_allclose(reading["magnitude_n"], np.linalg.norm(node.load), atol=0.05)
         assert reading["link"] == "end_link" and reading["point_xyz_m"] == list(LOAD_SITES["gripper"].xyz_m)
-        print(f"default gripper estimate: {reading}", flush=True)
+        print(f"gripper estimate with explicit contact provider: {reading}", flush=True)
 
         node.send_feedback = False
         node.wait_for(lambda: node.status_is("gripper", "waiting_feedback"))

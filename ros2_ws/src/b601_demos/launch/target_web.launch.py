@@ -2,6 +2,7 @@
 
 from http.client import HTTPConnection, HTTPException
 import json
+import os
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
@@ -17,7 +18,7 @@ from b601_demos.load_api import parse_load_positions
 
 def preview_already_running(port, gravity_source, gravity_api, load_positions, load_api):
     if port == 0:
-        return False
+        return None
     connection = HTTPConnection("127.0.0.1", port, timeout=2)
     try:
         connection.request("GET", "/api/state")
@@ -36,9 +37,13 @@ def preview_already_running(port, gravity_source, gravity_api, load_positions, l
                     if (load.get("positions", []), load.get("api", "")) != (list(load_positions), load_api):
                         raise RuntimeError(
                             f"端口 {port} 的控制台已用其他负载配置运行，请先结束该控制台或使用其他端口。")
-                    return True
+                    recording = state.get("recording_path")
+                    if bool(recording) != bool(os.environ.get("B601_WEB_RECORD_DIR")):
+                        raise RuntimeError(
+                            f"端口 {port} 的控制台已用其他日志设置运行，请先结束该控制台或使用其他端口。")
+                    return state
     except ConnectionRefusedError:
-        return False
+        return None
     except (HTTPException, OSError, ValueError):
         pass
     finally:
@@ -56,8 +61,12 @@ def launch_console(context):
         "load_positions": ParameterValue(",".join(load_positions), value_type=str),
         "load_api": ParameterValue(load_api, value_type=str),
     }
-    if preview_already_running(port, gravity_source, gravity_api, load_positions, load_api):
-        return [LogInfo(msg=f"B601 控制台已运行，请打开 http://127.0.0.1:{port}/")]
+    running = preview_already_running(port, gravity_source, gravity_api, load_positions, load_api)
+    if running:
+        actions = [LogInfo(msg=f"B601 控制台已运行，请打开 http://127.0.0.1:{port}/")]
+        if running.get("recording_path"):
+            actions.append(LogInfo(msg=f"网页会话日志：{running['recording_path']}"))
+        return actions
 
     description = Path(get_package_share_directory("b601_description"))
     urdf = xacro.process_file(

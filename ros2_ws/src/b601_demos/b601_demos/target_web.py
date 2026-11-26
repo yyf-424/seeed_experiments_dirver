@@ -1,11 +1,13 @@
 """Local HTTP and ROS bridge for the B601 target authorization console."""
 import json
+import os
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Thread
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 from xml.etree.ElementTree import ParseError
 
 import rclpy
@@ -31,6 +33,7 @@ from .mit_target import make_mit_target, positions_from_deltas
 from .gravity_provider import GravityProvider
 from .target_arbiter import ARBITER
 from .web_backend import WebBackend
+from .web_recording import WebRecording
 from .web_robot_model import build_model, find_vendor_model
 
 
@@ -44,8 +47,11 @@ class TargetWeb(Node):
         attached_scene = self.declare_parameter("attached_mujoco_scene", "").value
         attached_stiffness = self.declare_parameter("attached_stiffness_switching", "").value
         default_stiffness = self.declare_parameter("default_stiffness_switching", "false").value
+        directory = os.environ.get("B601_WEB_RECORD_DIR")
+        recording_dir = Path(directory).expanduser().resolve() if directory else None
         self.backend = WebBackend(
-            self, config, config_path, attached, attached_scene, attached_stiffness, default_stiffness)
+            self, config, config_path, attached, attached_scene, attached_stiffness,
+            default_stiffness, recording_dir=recording_dir)
         self.feedback_timeout = config["safety"]["feedback_timeout_sec"]
         self.heartbeat_period_ms = round(
             config["tools"]["target_arbitration"]["authority_timeout_sec"] * 200)
@@ -100,13 +106,34 @@ class TargetWeb(Node):
         self.recenter = self.create_client(Trigger, RECENTER_SERVICE)
         self.release_for_recenter = self.create_client(ReleaseSource, f"{ARBITER}/release_web_for_recenter")
         self.recenter_timeout = recenter_result_timeout(config)
+        self.recording = WebRecording(recording_dir, self.get_logger().error) if recording_dir else None
+        if self.recording:
+            gravity = self.gravity.snapshot()
+            self.recording.add("console_started", port=self.port, domain_id=self.context.get_domain_id(),
+                               gravity_source=gravity["requested"], gravity_api=gravity["api"],
+                               load_api=self.load_api, load_positions=self.load_positions)
 
     def on_status(self, message):
-        self.status = json.loads(message.data)
+        previous = self.status or {}
+        self.status = current = json.loads(message.data)
+        if self.recording:
+            target = current.get("last_forwarded")
+            if target and target != previous.get("last_forwarded"):
+                self.recording.add("target_forwarded", **target)
+            applied = current.get("last_applied_id")
+            if applied and applied != previous.get("last_applied_id"):
+                self.recording.add("target_applied", dispatch_id=applied)
 
     def on_feedback(self, message):
         self.feedback_sample = (dict(zip(message.name, message.position)), time.monotonic())
         self.gravity.feedback = self.feedback_sample
+        if self.recording:
+            stamp = message.header.stamp
+            self.recording.add(
+                "joint_feedback", ros_stamp_ns=stamp.sec * 10**9 + stamp.nanosec,
+                positions=self.feedback_sample[0], velocities=dict(zip(message.name, message.velocity)),
+                efforts=dict(zip(message.name, message.effort)),
+            )
 
     def on_stiffness_feedback(self, message):
         joint = next((values for name, values in zip(message.joint_names, message.interface_values)
@@ -118,7 +145,10 @@ class TargetWeb(Node):
         self.sim_stiffness_sample = (message.data, time.monotonic())
 
     def on_load(self, message):
-        self.load_sample = (time.monotonic(), load_snapshot(message))
+        reading = load_snapshot(message)
+        self.load_sample = (time.monotonic(), reading)
+        if self.recording:
+            self.recording.add("load_estimate", **reading)
 
     def load_state(self, now):
         if not self.load_api:
@@ -138,6 +168,11 @@ class TargetWeb(Node):
     def on_compensation_sources(self, controller, message):
         if len(message.joints) == len(message.gravity_external) == len(message.friction_external):
             self.compensation_samples[controller] = (time.monotonic(), message)
+            if self.recording:
+                self.recording.add("compensation_sources", controller=controller, joints=list(message.joints),
+                                   gravity_enabled=message.gravity_enabled,
+                                   gravity_external=list(message.gravity_external),
+                                   friction_external=list(message.friction_external))
 
     def compensation_sources(self, now):
         gravity, friction = {}, {}
@@ -192,6 +227,7 @@ class TargetWeb(Node):
             "gravity_api": gravity["api"] if gravity["requested"] == "external" else "",
             "gravity_selection": gravity,
             "load": self.load_state(now),
+            "recording_path": str(self.recording.path) if self.recording else None,
             "compensation_sources": self.compensation_sources(now) if connected else None,
             "recenter_ready": self.recenter.service_is_ready(),
             "feedback": {} if show_preview else feedback,
@@ -365,14 +401,21 @@ class TargetHandler(BaseHTTPRequestHandler):
         if self.headers.get_content_type() != "application/json":
             self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"message": "需要 JSON"})
             return
+        path = urlsplit(self.path).path
+        recorder = self.server.bridge.recording if path != "/api/heartbeat" else None
+        operation_id = uuid4().hex if recorder else None
         try:
             length = int(self.headers.get("Content-Length", 0))
             if not 0 < length <= 65536:
                 raise ValueError("invalid request size")
             data = json.loads(self.rfile.read(length))
-            code, body = self.server.bridge.request(urlsplit(self.path).path, data)
+            if recorder:
+                recorder.add("web_request", operation_id=operation_id, path=path, payload=data)
+            code, body = self.server.bridge.request(path, data)
         except (ValueError, TypeError, KeyError, AssertionError, OverflowError) as error:
             code, body = HTTPStatus.BAD_REQUEST, {"message": str(error)}
+        if recorder:
+            recorder.add("web_result", operation_id=operation_id, path=path, status=int(code), payload=body)
         self.send_json(code, body)
 
     def log_message(self, _format, *_args):
@@ -395,21 +438,28 @@ class TargetHandler(BaseHTTPRequestHandler):
 def main(args=None):
     rclpy.init(args=args)
     node = TargetWeb()
-    with ThreadingHTTPServer(("127.0.0.1", node.port), TargetHandler) as server:
-        server.bridge = node
-        server.assets = Path(get_package_share_directory("b601_demos")) / "web"
-        thread = Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        node.get_logger().info(f"Target console: http://127.0.0.1:{server.server_port}")
-        try:
-            rclpy.spin(node)
-        except (KeyboardInterrupt, ExternalShutdownException):
-            pass
-        except RuntimeError:
-            if rclpy.ok():
-                raise
-        finally:
-            server.shutdown()
-            thread.join()
-            node.destroy_node()
-            rclpy.try_shutdown()
+    try:
+        with ThreadingHTTPServer(("127.0.0.1", node.port), TargetHandler) as server:
+            server.bridge = node
+            server.assets = Path(get_package_share_directory("b601_demos")) / "web"
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            node.get_logger().info(f"Target console: http://127.0.0.1:{server.server_port}")
+            if node.recording:
+                node.get_logger().info(f"网页会话日志：{node.recording.path}")
+            try:
+                rclpy.spin(node)
+            except (KeyboardInterrupt, ExternalShutdownException):
+                pass
+            except RuntimeError:
+                if rclpy.ok():
+                    raise
+            finally:
+                server.shutdown()
+                thread.join()
+    finally:
+        if node.recording:
+            node.recording.add("console_stopped")
+            node.recording.close()
+        node.destroy_node()
+        rclpy.try_shutdown()

@@ -22,6 +22,7 @@ v1.1.2 支持持续外部重力补偿、停更回退和手动切换。网页外�
 | 场景 | 入口 |
 |---|---|
 | 只看网页与官方三维模型 | `./scripts/start_target_web.sh`，打开 [本地控制台](http://127.0.0.1:8765/) |
+| 外部高斯重力、夹爪估计和会话日志 | `./scripts/start_target_web_external.sh`。 [外部 API 一键启动](#外部-api-一键启动) |
 | 演练网页发令与归中 | 在网页手动连接 MuJoCo，发送目标后归中、Disable |
 | 对比内置重力与高斯模型 | 按各自的启动参数打开 Web，再连接 MuJoCo 物理场景。 [启动命令](#在上层启动时选择重力来源) |
 | 跑标准位置与 MoveIt 轨迹 | 加载当前工作区后运行 `ros2 launch b601_moveit_config demo.launch.py hardware:=mock` |
@@ -563,6 +564,24 @@ Web、SDK、手动 CLI 和归中共用重力来源选择。默认使用内部重
 - SDK 可调用 `client.set_gravity_source("internal")` 或 `client.set_gravity_source("external", "module:factory")`。请求在该节点继续处理 ROS 回调时生效。
 - ROS 2 服务 `/b601_target_bridge/set_gravity_source` 接收 `b601_target_interfaces/srv/SetGravitySource`。空 `efforts` 选择内部，带外部力矩时选择外部，选中提供者可通过 `/b601_target_bridge/gravity_update` 更新。选择时省略的轴使用内部模型。既有目标帧也可用 `gravity_ff` 为所列轴提供一次外部样本。
 - 用 `/api/state` 的 `gravity_selection.selected` 看用户选择，`stale` 看是否停更，用 `compensation_sources.gravity` 核对逐轴实际采用的来源，取值为 `disabled`、`internal` 或 `external`。
+
+#### 外部 API 一键启动
+
+在已构建的实验工作区运行以下命令。
+
+```bash
+./scripts/start_target_web_external.sh
+```
+
+打开 [本地控制台](http://127.0.0.1:8765/)。网页先进入预览，由操作者选择并连接后端。脚本默认使用本地 ROS 域 `226`，预设 `GaussianFeedforward.load` 和新版夹爪负载 API。分开存放两个辨识项目时，可通过 `B601_GRAVITY_ROOT` 和 `B601_LOAD_ROOT` 指定路径。可传 `port:=8766` 改用其他端口。
+
+会话目录位于 `.verify/web-recordings/`，可用 `B601_WEB_LOG_ROOT` 改变根目录。终端和 `/api/state` 的 `recording_path` 显示 JSONL 路径。同配置复用已运行的预览时，继续写入该会话的日志。
+
+| 输出 | 内容 |
+|---|---|
+| `events.jsonl` | 网页操作、目标转发与采纳、带时间戳的关节反馈、夹爪估计、各轴补偿来源 |
+| `ros/` | Web 和后端的 ROS 启动与运行日志 |
+| `dm-feedback-*.csv` | 从页面连接实机时，驱动记录的电机反馈与下发参考 |
 
 ### 客户端示例
 

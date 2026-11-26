@@ -1,5 +1,6 @@
 """Launch ROS bringup from the standalone local console and report its lifecycle."""
 import os
+import shlex
 import signal
 import subprocess
 from contextlib import ExitStack
@@ -8,7 +9,7 @@ from http import HTTPStatus
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from threading import Lock
-from time import monotonic, sleep
+from time import monotonic, sleep, time_ns
 
 from controller_manager_msgs.srv import ListControllers, SetHardwareComponentState, SwitchController
 from lifecycle_msgs.msg import State
@@ -23,7 +24,7 @@ MUJOCO_SCENES = ("free", "physical")
 STIFFNESS_SETTINGS = ("auto", "true", "false")
 
 
-def bringup_command(backend, project_file, mujoco_scene="free", stiffness_switching="auto"):
+def bringup_command(backend, project_file, mujoco_scene="free", stiffness_switching="auto", *, dm_log_csv=None):
     args = [
         "ros2", "launch", "b601_bringup", "bringup.launch.py",
         f"hardware:={backend}", "dm_command_mode:=mit_impedance",
@@ -33,6 +34,9 @@ def bringup_command(backend, project_file, mujoco_scene="free", stiffness_switch
     ]
     if backend == "dm":
         args.extend(("dm_enable_motors:=true", "mit_gravity_compensation:=true"))
+        if dm_log_csv is not None:
+            # bringup passes this value through launch Command's xacro tokenization.
+            args.append(f"dm_log_csv:={shlex.quote(str(dm_log_csv))}")
     elif backend == "mujoco":
         args.append(f"mujoco_scene:={mujoco_scene}")
     if project_file:
@@ -42,9 +46,10 @@ def bringup_command(backend, project_file, mujoco_scene="free", stiffness_switch
 
 class WebBackend:
     def __init__(self, node, project, project_file, attached, attached_mujoco_scene,
-                 attached_stiffness_switching, default_stiffness_switching):
+                 attached_stiffness_switching, default_stiffness_switching, *, recording_dir=None):
         self.node = node
         self.project_file = project_file
+        self.recording_dir = recording_dir
         self.attached = attached
         self.mujoco_scene = attached_mujoco_scene or None
         self.stiffness_switching = attached_stiffness_switching or None
@@ -214,8 +219,11 @@ class WebBackend:
             output = stack.enter_context(NamedTemporaryFile(
                 prefix=f"b601-web-{backend}-", suffix=".log", dir=directory, delete=False))
             self.log_path = Path(output.name)
+            dm_log_csv = self.recording_dir / f"dm-feedback-{time_ns()}.csv" if (
+                self.recording_dir and backend == "dm") else None
             return subprocess.Popen(
-                bringup_command(backend, self.project_file, mujoco_scene, stiffness_switching),
+                bringup_command(backend, self.project_file, mujoco_scene, stiffness_switching,
+                                dm_log_csv=dm_log_csv),
                 start_new_session=True,
                 env={**os.environ, "ROS_DOMAIN_ID": str(domain)},
                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,

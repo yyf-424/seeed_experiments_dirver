@@ -329,6 +329,8 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 
 启用后默认显示 `gripper`。示例工厂调用 `load_identification` 的物理观察器。要用新版夹爪 API，可指定 `load_api:=b601_load_id.gripper_load_api:create_provider`。启动脚本从当前检出目录向上寻找 `load_identification`，也可以用 `B601_LOAD_ROOT` 指定该仓库的路径。这两个工厂都需要该仓库及其 Python 依赖。
 
+新版夹爪 API 根据关节反馈力矩与空载重力基线的差异估计夹爪处的等效力。加减速产生的惯性力矩也会进入估计，运动中的读数因此可能在空载时非零。该 API 可用理论重力基线直接开始估计。需要修正空载偏差时，在夹爪空载、机械臂静稳时调用清零服务。
+
 打开 [本地控制台](http://127.0.0.1:8765/)，连接 MuJoCo，或按项目约定取得现场确认后连接实机。显示「待空载清零」时，在相同 ROS 域的另一个终端加载环境。在姿态稳定且无外加负载时调用清零服务。示例中的物理观察器采集约 1 秒空载反馈，每个刚度档独立保存参考。等网页显示「未检测到外力」后即可观察读数。
 
 ```bash
@@ -342,19 +344,27 @@ curl -s http://127.0.0.1:8765/api/load
 |---|---|
 | `waiting_node` / `waiting_feedback` | 等待负载节点或关节反馈。核对后端是否已启动，以及两端的 ROS 域。 |
 | `uncalibrated` / `taring` | 当前刚度档需要空载清零，或正在采集空载参考。 |
-| `no_contact` | 估计器未检测到外力。大小为零，方向为空。 |
-| `estimated` | 读到有效力向量。 |
+| `no_contact` | 估计器的输出为零，方向为空。 |
+| `estimated` | 估计器给出有效力向量。夹爪网络输出等效力，读数可含运动惯性。 |
 | `ambiguous` / `residual_only` | 方向或作用点存在歧义，或所选作用点无法解释观测到的力矩残差。 |
 | `provider_error` | 检查 `load_api`、模块搜索路径和负载节点日志。 |
 
-MIT bringup 通过 `use_target_web:=true` 启动网页时，用 `target_web_load_api:=module:factory` 同时启动估计节点。可选的 `target_web_load_positions` 默认是 `gripper`。使用上述工厂时，将 `load_identification` 的检出目录加入 `PYTHONPATH`。只向 ROS 客户端提供读数时，也可以在同一 ROS 域单独运行估计节点。
+MIT bringup 通过 `use_target_web:=true` 启动网页时，用 `target_web_load_api:=module:factory` 同时启动估计节点。可选的 `target_web_load_positions` 默认是 `gripper`。使用上述工厂时，将 `load_identification` 的检出目录加入 `PYTHONPATH`。
+
+##### 不开网页时读取夹爪估计
+
+后端已启动时，在相同 ROS 域单独运行 `b601_load`。以下命令从实验工作区根目录执行。
 
 ```bash
 source scripts/ros_env.sh && b601_source_workspace
 B601_LOAD_ROOT=/path/to/seeed/load_identification
 PYTHONPATH="$B601_LOAD_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
-  ros2 run b601_demos load_node --ros-args -p load_positions:=gripper
+  ros2 run b601_demos load_node --ros-args \
+  -p load_positions:=gripper \
+  -p load_api:=b601_load_id.gripper_load_api:create_provider
 ```
+
+在另一终端加载相同环境后，订阅 `ros2 topic echo /b601_load/estimates --qos-reliability best_effort`。MIT 回路仍可通过 SDK、命令行、原生 ROS 2 或归中入口选择外部重力。MoveIt 的 `pos_vel` 回路可读取夹爪估计。MIT 外部重力需要 MIT 控制器及桥接器。 [非 Web MuJoCo 复测](validation/target-web.md#非-web-上层接口复测)
 
 ##### 位置与参考系
 

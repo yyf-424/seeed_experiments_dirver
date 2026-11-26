@@ -188,3 +188,17 @@ OPENBLAS_NUM_THREADS=1 python3 scripts/test_load_feedback.py
 同一姿态下对比 URDF 与物理 MJCF 的四个作用点，基座系下最大位置差为 `2.07e-7 m`。Chromium 验证 `10.77 N` 和带符号的 XYZ 读数，并确认夹爪箭头随反馈中断消失。实机外力估计的精度待现场测力确认。
 
 挂载式 Web 使用隔离 MuJoCo 复测。只启用外部重力时，`/api/state` 中的 `load` 为 `null`，`b601_load` 未启动，Chromium 中的外力面板隐藏。显式传入 `target_web_load_api:=b601_load_id.gripper_load_api:create_provider` 后，节点启动并提供夹爪读数，Chromium 显示面板。
+
+## 非 Web 上层接口复测
+
+2026-11-27 在 `v1.1.2` 的隔离 MuJoCo 物理场景中验证。重力提供者使用实际高斯 API `neural_network.feedforward:GaussianFeedforward.load`，负载节点独立运行 `b601_load_id.gripper_load_api:create_provider`，各入口均从 ROS 反馈核对结果。 [启动独立估计节点](../README.md#不开网页时读取夹爪估计) · [重力选源](../README.md#在上层启动时选择重力来源)
+
+| 入口 | 观测结果 |
+|---|---|
+| Python `TargetClient` | 点发和流式发送均采纳，J2–J5 回读为外部，夹爪估计持续发布。释放运动会话后，只要提供者节点继续处理 ROS 回调，外部重力仍持续更新 |
+| 手动 MIT 命令行 | 使用外部 API 完成目标。进程退出后重力回退内部，夹爪估计继续发布 |
+| 原生 ROS 2 | 用重力选择服务与更新话题提供高斯样本，用目标服务发令。控制器采纳，提供者停更后回退内部，夹爪估计继续发布 |
+| MIT 归中 | 使用外部高斯 API 完成六轴归中，负载节点持续输出，停稳后归零 |
+| MoveIt `pos_vel` | 规划并执行末端上移 20 mm，夹爪估计持续发布。该位置回路未加载 MIT 重力桥接器 |
+
+在夹爪估计点固定 0.8 kg 模拟载荷，理论载荷为 7.85 N，方向沿 `base_link` 的 −Z。SDK、命令行和原生 ROS 2 的核对样本为 7.32–7.55 N，方向距 −Z 约 2°。在空载归中复测中，250 个样本有 18 个为非零，最大 77.60 N，同姿态回放未见碰撞接触，停稳后归零。夹爪网络从关节力矩变化估计等效负载，加减速产生的惯性力矩也会计入读数。验收确认了接口可用性及已知载荷的采样结果。

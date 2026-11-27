@@ -105,6 +105,8 @@ select, input[type="text"], input[type="number"] { background: #0b1c27; color: v
 .placeholder { color: var(--subtle); margin: .6rem 0; }
 .tcp-jog { padding: .75rem 0 .55rem; border-bottom: 1px solid var(--line); }
 .tcp-jog-head { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.tcp-rotation-head { margin-top: .8rem; }
+.tcp-rotation-head h3 { margin: 0; font-size: .87rem; }
 .tcp-frame, .tcp-jog-status, .tcp-step { color: var(--subtle); font-size: .78rem; }
 .tcp-frame { margin: .22rem 0 0; }
 .tcp-frame code { color: var(--blue); }

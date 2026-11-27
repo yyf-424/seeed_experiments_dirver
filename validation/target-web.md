@@ -1,5 +1,7 @@
 # 上层框架验收
 
+本页记录 `B601_experiments` 的隔离 MuJoCo 回归、实机日志复算和各版本的发布复测。安装和使用流程见 [README](../README.md)。
+
 ## MIT 定时轨迹复测
 
 本节对应 `B601_experiments/main` 的功能提交 `ca73e33`。可从 [启动与停机说明](../README.md#mit-定时轨迹) 进入复测。实机原始 CSV、轨迹 JSON 和曲线保存在本机工作区的 `.verify/`。
@@ -39,18 +41,16 @@
 
 收到 333 帧 action 反馈，驱动记录显示六轴参考均达到设定幅值，夹爪驱动参考保持恒定，实测漂移最大 0.0038 mm。末段等待 2 秒后，J2 终点误差仍超过配置容差 10 mrad，action 返回 `GOAL_TOLERANCE_VIOLATED`。J3 实测幅值约为目标的 38%。全程未触发急停。随后六轴按归中服务到位，硬件确认 `inactive`，串口已释放。 [实际轨迹](../.verify/mit-trajectory-real-six/real-goal.json) · [跟踪曲线](../.verify/mit-trajectory-real-six/trajectory-tracking.png) · [驱动参考与反馈](../.verify/mit-trajectory-real-six/driver-feedback.csv) · [归中停机](../.verify/mit-trajectory-real-six/main-park.log)
 
-本页记录 `B601_experiments` 当前扩展验收与各版本的发布复测。扩展试验在隔离 MuJoCo 中运行。安装和使用流程见 [README](../README.md)。
-
 ## 节点和数据流
 
 | 接口 | 职责 |
 |---|---|
 | `scripts/start_target_web.sh` | 启动本地网页及命名空间 `/b601_preview` 下的模型发布器。独立启动时展示默认姿态，可指定重力来源。显式指定 `load_api` 时启动负载节点。同配置复用已有控制台 |
 | `scripts/send_joint_deltas.py` | 按 J1–J6、主动夹爪的顺序点发七轴增量，通过网页 HTTP 换算绝对目标并回读转发编号 |
-| `b601_target_web` | 展示 URDF、实测和目标姿态，提供 TCP 逆解、控制权、后端和刚度选择、补偿来源回读、归中与 Disable |
+| `b601_target_web` | 展示 URDF、实测和目标姿态，提供 TCP 平移与原地旋转、控制权、后端和刚度选择、补偿来源回读、归中与 Disable |
 | `b601_target_arbiter` | 整机只授予一个有效会话。确认会话、递增序号、有限值及关节限位后，向手臂和夹爪分别发布授权目标 |
 | `b601_target_bridge` | 调用现有 MIT 控制器的 `joint_target` 入口，按控制器消费序号匹配回执。来源失联或仲裁心跳中断时，以新鲜实测位置提交持位目标 |
-| `b601_tcp_primitives` | 规划基座坐标系 TCP 平移序列，显式执行时经同一 MIT 仲裁会话逐段发送并回读 |
+| `b601_tcp_primitives` | 规划基座坐标系 TCP 平移与旋转序列，显式执行时经同一 MIT 仲裁会话逐段发送并回读 |
 | `b601_mit_recenter` | 通过整机仲裁接管，按 J4 上抬、其余五轴归中、J4 回落执行，依据六轴实测及控制器回执完成归中 |
 
 客户端通过同一整机会话提交目标。`TargetFrame` 接受七关节位置、可选速度和任务前馈。`MitTargetFrame` 另可携带外部重力和摩擦补偿。控制器的采纳回执用于确认目标已经消费，位置误差和到位窗口用于确认运动完成。网页 Disable 需要最近一次归中回执及六轴仍在停放范围。执行期间仲裁会冻结新的会话申请，网页确认硬件进入 `inactive` 后退出后端。
@@ -120,6 +120,68 @@ MoveIt 在仿真后端归中失能后退出时复现已知段错误。网页已�
 
 以 01:00:04.921 的真机关节反馈离线回放「前 20 mm」。起点 Z 为 277.57 mm，
 上一条目标 Z 为 291.36 mm，修正后规划终点 Z 为 291.36 mm。 [回放数值](../.verify/tcp-reference-replay/result.json)
+
+### TCP 原地旋转复测
+
+构建后，在隔离 MuJoCo MIT 和 MoveIt 中复测三轴旋转、六向平移和 Web 同会话组合。
+
+```bash
+source scripts/ros_env.sh && b601_source_workspace
+B601_TEST_ROS_DOMAIN_ID=181 python3 scripts/test_target_arbitration.py --tcp-primitives --http-port 8916
+```
+
+按 `rotate_x 5 rotate_y -5 rotate_z 5` 顺序执行。目标 XYZ 完全相同。以下实测位置漂移由仿真关节反馈正解得到，单位为 mm。
+
+| 段 | 中途实测最大漂移 | 段末实测漂移 | 段末角度误差 |
+|---|---:|---:|---:|
+| 绕 X 正转 5° | 0.590 | 0.00051 | 0.000072° |
+| 绕 Y 反转 5° | 0.885 | 0.00021 | 0.000026° |
+| 绕 Z 正转 5° | 0.664 | 0.00007 | 0.000008° |
+
+目标轨迹采样点经正解的最大位置偏差为 0.0274 mm。Chromium 在物理 MuJoCo 通过网页完成左移、绕 Y 反转 3°、重力切换、夹爪负载回读、七关节目标、归中与失能。Web API 同一会话的旋转后平移保持旋转后的姿态，失败规划与普通关节目标的参考语义通过回归。MoveIt 在仿真停机时复现已知退出段错误。 [轨迹数值](../.verify/tcp-rotation/path-metrics.json) · [网页](../.verify/tcp-rotation/browser-retry/connected.png) · [原语回归](../.verify/tcp-rotation/tcp.log)
+
+用实际高斯重力和夹爪负载工厂的一键入口复测物理 MuJoCo。左移 3 mm 后绕 Y 反转 3°，固定同一个目标位置。旋转前后实测位置相差 0.358 mm，段末姿态误差为 0.100°，距目标位置 1.675 mm。后续归中、失能并落盘。默认和物理 MuJoCo 仲裁分别通过 16 项和 8 项，负载专项通过。 [一键入口](../.verify/tcp-rotation/external-smoke.log) · [默认回归](../.verify/tcp-rotation/standard-final.log) · [物理回归](../.verify/tcp-rotation/physical-final.log)
+
+最终源码构建 10 包，自检 34/34，完整离线回归 21/21，六向平移、三轴旋转和 Web 同会话组合再次通过。 [最终原语回归](../.verify/tcp-rotation/tcp-final.log) · [离线回归](../.verify/tcp-rotation/preflight.log)
+
+### TCP 原语上层入口复测
+
+使用隔离 MuJoCo。网页一键入口在有重力与碰撞的场景连接实际高斯重力和夹爪负载 API，执行 3 mm 平移与 ±3° 旋转。其余程序接口用保持夹爪开度的 MuJoCo 夹具执行。每段核对控制器联合采纳。平移保持目标姿态，旋转保持目标 XYZ。
+
+| 入口 | 通过项 |
+|---|---|
+| 网页 | 一键入口实际点击全部 12 个平移和旋转按钮，核对重力、负载和归中失能。普通独立网页、挂载式网页分别通过混合点动 |
+| CLI `tcp_primitives` | 12 段混合序列预览与执行。预览无仲裁目标，执行后释放会话 |
+| HTTP `/api/tcp_jog` | 独立客户端执行同样的 12 段，核对连续参考、日志、序号、回执及零角拒绝 |
+| Python SDK | 分别通过 `set_joints()` 与 `publish()` 执行三轴平移和旋转的规划采样点 |
+| 原生 ROS 2 | 分别通过 `SetTarget` 服务与 `TargetFrame` 话题执行三轴平移和旋转的同一规划结果 |
+
+日常回归可用原地旋转小节的启动命令复跑。完整入口矩阵的记录保留于本工作树。MoveIt 在仿真退出时复现已知段错误，测试进程已退出。 [浏览器](../.verify/upper-primitives/browser.log) · [普通网页](../.verify/upper-primitives/standard-web.log) · [挂载网页](../.verify/upper-primitives/attached.log) · [CLI、HTTP 和服务](../.verify/upper-primitives/matrix-results.json) · [流式结果](../.verify/upper-primitives/stream-results.json)
+
+### TCP 平移与旋转实机复测
+
+2026-11-27 15:54–15:56 的 B601-DM 日志含 32 次成功点动，其中 19 次平移、13 次旋转。样本使用内部与外部重力补偿，分段姿态和动作顺序不同。位置与姿态由关节反馈正解计算。测试以归中和 Disable 结束。
+
+| 动作 | 次数 | 三维终点位置 RMSE | 最大终点位置误差 |
+|---|---:|---:|---:|
+| 全部 | 32 | 7.20 mm | 15.46 mm |
+| 平移 | 19 | 6.90 mm | 13.18 mm |
+| 旋转 | 13 | 7.61 mm | 15.46 mm |
+
+旋转姿态 RMSE 为 0.845°。旋转目标 XYZ 均保持上一参考位置，实测 TCP 在各次旋转开始与结束之间的位置变化 RMSE 为 11.91 mm，最大 18.52 mm。全轮 X/Y/Z 的终点 RMSE 为 1.45/0.65/7.02 mm。最终关节目标正解相对规划目标的三维位置 RMSE 约 0.00001 mm。
+
+关节稳态统计使用下一操作前的 0.30 秒保持窗，首条动作因窗内仍在漂移而排除。31 条有效样本中，只有绝对关节指令增量至少为 1° 的样本参与相对误差计算。分母为本次最终关节指令与动作开始前驱动参考的差值。
+
+| 关节 | 最大绝对稳态误差 | 最大相对误差 | 仅旋转最大相对误差 |
+|---|---:|---:|---:|
+| J1 | 0.294° | 16.4% | 6.4% |
+| J2 | 0.721° | 49.3% | 36.6% |
+| J3 | 1.990° | 85.4% | 67.6% |
+| J4 | 0.595° | 17.7% | 17.7% |
+| J5 | 0.708° | 69.6% | 69.6% |
+| J6 | 0.328° | 9.5% | 9.5% |
+
+[TCP 逐次数据](../.verify/web-recordings/20261127-154905-g4BYFH/analysis/tcp-jogs.csv) · [关节逐次数据](../.verify/web-recordings/20261127-154905-g4BYFH/analysis/joint-steady-relative.csv)
 
 ### TCP 平移原语组合
 

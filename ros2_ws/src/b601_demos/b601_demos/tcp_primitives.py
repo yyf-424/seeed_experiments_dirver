@@ -1,4 +1,4 @@
-"""Plan base-frame translations and replay them through the MIT target arbiter."""
+"""Plan base-frame TCP primitives and replay them through the MIT target arbiter."""
 import argparse
 import json
 from time import monotonic
@@ -15,12 +15,12 @@ from b601_description.project_config import load_project_config
 from .mit_target import measured_positions
 from .target_arbiter import ARBITER
 from .target_client import TargetClient
-from .tcp_motion import BASE, TCP, TcpPlanner, primitive, xyz
+from .tcp_motion import BASE, TCP, TcpPlanner, angular_error_deg, orientation, primitive, xyz
 
 
 def parse_primitives(tokens):
     if not tokens or len(tokens) % 2:
-        raise ValueError("按「方向 距离_mm」输入一组或多组原语")
+        raise ValueError("按「原语 数值」输入，平移用 mm，旋转用带符号的度数")
     return [primitive(direction, raw) for direction, raw in zip(tokens[::2], tokens[1::2])]
 
 
@@ -92,7 +92,7 @@ class TcpPrimitives(Node):
                         self.service_timeout, f"两组 MIT 控制器未共同采纳目标 {dispatch}", executing=True)
         self.wait_motion(self.settle)
         self.check_execution()
-        return dispatch, xyz(self.planner.fk_pose(self.sample()))
+        return dispatch, self.planner.fk_pose(self.sample())
 
     def run(self, primitives, execute):
         self.wait_until(
@@ -117,27 +117,32 @@ class TcpPrimitives(Node):
         )
         initial = self.sample()
         origin, segments = self.planner.plan(primitives, initial)
-        report(event="start", frame=BASE, tcp=TCP, measured_xyz_mm=[value * 1000 for value in xyz(origin)])
+        report(event="start", frame=BASE, tcp=TCP, measured_xyz_mm=[value * 1000 for value in xyz(origin)],
+               measured_orientation_xyzw=orientation(origin))
         for index, segment in enumerate(segments, 1):
-            report(event="planned", segment=index, direction=segment.direction, distance_mm=segment.distance_mm,
+            report(event="planned", segment=index, **segment.motion,
                    target_xyz_mm=[value * 1000 for value in segment.goal],
+                   target_orientation_xyzw=orientation(segment.goal_pose),
                    points=len(segment.trajectory.points))
         if execute:
             self.check_execution()
             gripper = initial[self.gripper]
             before = xyz(origin)
             for index, segment in enumerate(segments, 1):
-                dispatch, after = self.execute(segment, gripper)
+                dispatch, pose = self.execute(segment, gripper)
+                after = xyz(pose)
                 report(event="executed", segment=index, direction=segment.direction, dispatch_id=str(dispatch),
                        measured_xyz_mm=[value * 1000 for value in after],
-                       delta_xyz_mm=[(end - start) * 1000 for start, end in zip(before, after)])
+                       delta_xyz_mm=[(end - start) * 1000 for start, end in zip(before, after)],
+                       measured_orientation_xyzw=orientation(pose),
+                       angular_error_deg=angular_error_deg(segment.goal_pose, pose))
                 before = after
 
 
 def main():
-    parser = argparse.ArgumentParser(description="规划基座坐标系内的 TCP 平移原语组合")
+    parser = argparse.ArgumentParser(description="规划基座坐标系内的 TCP 平移与旋转原语组合")
     parser.add_argument("--execute", action="store_true", help="通过已运行的 MIT 目标仲裁执行")
-    parser.add_argument("primitives", nargs="+", metavar="方向 距离_mm")
+    parser.add_argument("primitives", nargs="+", metavar="原语 数值")
     args = parser.parse_args()
     try:
         primitives = parse_primitives(args.primitives)

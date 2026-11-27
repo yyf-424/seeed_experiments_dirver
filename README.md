@@ -24,6 +24,7 @@ v1.1.2 支持持续外部重力补偿、停更回退和手动切换。网页外�
 | 只看网页与官方三维模型 | `./scripts/start_target_web.sh`，打开 [本地控制台](http://127.0.0.1:8765/) |
 | 外部高斯重力、夹爪估计和会话日志 | `./scripts/start_target_web_external.sh`。 [外部 API 一键启动](#外部-api-一键启动) |
 | 演练网页发令与归中 | 在网页手动连接 MuJoCo，发送目标后归中、Disable |
+| 按基座坐标系点动 TCP | 网页「TCP 点动」、`tcp_primitives` CLI 或 `/api/tcp_jog`。 [原语用法](#tcp-原语组合) |
 | 对比内置重力与高斯模型 | 按各自的启动参数打开 Web，再连接 MuJoCo 物理场景。 [启动命令](#在上层启动时选择重力来源) |
 | 跑 MoveIt 与 MIT 定时轨迹 | 加载当前工作区后运行 `ros2 launch b601_moveit_config demo.launch.py`。默认使用 MuJoCo 物理场景。 [启动与接口](#mit-定时轨迹) |
 | 跑 mock 位置回路 | `ros2 launch b601_moveit_config demo.launch.py hardware:=mock` |
@@ -524,7 +525,11 @@ dispatch_id = client.set_joint_deltas({"joint2": -0.02, "joint4": 0.03}, timeout
 
 HTTP `POST /api/delta_target` 接收 `session_id`、递增的 `sequence` 和按关节名索引的 `deltas`。成功响应包含 `dispatch_id` 和合成后的 `positions`。反馈不齐或过期时上层拒绝计算。绝对目标沿用既有位置范围校验。
 
-### TCP 平移原语组合
+### TCP 原语组合
+
+[平移原语](#tcp-平移原语组合)与[原地旋转](#tcp-原地旋转)可在同一序列中执行。
+
+#### TCP 平移原语组合
 
 `codex/tcp-primitives` 提供 `ros2 run b601_demos tcp_primitives`。在 `base_link` 下定义六个方向。
 `forward` / `backward` 对应 ±X，`left` / `right` 对应 ±Y，`up` / `down` 对应 ±Z。
@@ -546,33 +551,46 @@ ros2 run b601_demos tcp_primitives forward 20 left 20 backward 20 right 20
 ros2 run b601_demos tcp_primitives --execute forward 20 left 20 backward 20 right 20
 ```
 
-下面的隔离回归自行启动 MoveIt 和 MuJoCo，覆盖预览、四方向、同方向叠加和整组规划失败。
+下面的隔离回归自行启动 MoveIt 和 MuJoCo，覆盖六向平移、三轴旋转、连续参考、规划失败与网页混合点动。
 
 ```bash
 ./scripts/build.sh
 source scripts/ros_env.sh && b601_source_workspace
-B601_TEST_ROS_DOMAIN_ID=219 python3 scripts/test_target_arbitration.py --tcp-primitives
+B601_TEST_ROS_DOMAIN_ID=219 python3 scripts/test_target_arbitration.py --tcp-primitives --http-port 8916
 ```
 
 回读保存在 `.verify/target-arbitration-219/tcp-primitives.json`。
-0.1 mm 是命令下限。本轮测量基于仿真关节回读，实机运动和精度尚未验收。
-[复测记录](validation/target-web.md#tcp-平移原语组合)
+0.1 mm 是平移命令下限。仿真和实机的误差均以关节反馈正解得到。 [仿真复测](validation/target-web.md#tcp-原语上层入口复测) · [实机复测](validation/target-web.md#tcp-平移与旋转实机复测)
+
+#### TCP 原地旋转
+
+`rotate_x`、`rotate_y`、`rotate_z` 后跟带符号的角度（度）。转轴过 `end_link` 的 TCP，方向与对应的 `base_link` 轴平行。正角遵循右手定则，旋转目标的 XYZ 沿用该段参考位置。角度按 360° 取带符号余量，余量为零的命令会被拒绝。
+
+在已启动的隔离 MuJoCo MIT 和 MoveIt 会话中，可先预览，再执行平移与旋转组合。
+
+```bash
+ros2 run b601_demos tcp_primitives rotate_x 5 rotate_y -5 rotate_z 5
+ros2 run b601_demos tcp_primitives --execute rotate_z 5 forward 8 rotate_z -5
+```
+
+CLI 回读 TCP 的 XYZ、四元数和姿态误差。工具旋转后，后续平移沿用旋转后的工具姿态。
 
 ### 网页 TCP 点动
 
-在控制台取得网页控制权后，填写「位移（mm）」并点击「TCP 点动」中的方向按钮。
-面板显示 `base_link` 及每个方向的轴符号。每次点击执行一个原语，MoveIt 从最新实测关节位规划。
-同一网页会话连续点动会以最后一条已采纳的 TCP 目标为参考，只累加所选轴，并保持目标工具姿态。
-第一次点动、换会话或发出普通关节目标后的第一次点动，以当前实测 TCP 初始化。
-完成后显示反馈推算的 ΔXYZ，夹爪目标沿用点动起点的开度。
+使用外部高斯重力与夹爪负载估计时，从 [一键启动入口](#外部-api-一键启动) 打开网页，连接后端并授予网页控制权。在「TCP 点动」填写位移后点击方向键，或在「原地旋转」填写角度后点击 `绕 +X`、`绕 −X` 等按钮。面板上的方向和轴都以 `base_link` 为准。
+
+同一会话连续点动时，平移在上一条已采纳的 TCP 目标上累加选中轴并保持姿态，旋转保持上一目标 XYZ 并更新姿态。首次点动、换会话或普通关节目标后的首次点动，以实测 TCP 位姿初始化。MoveIt 从最新实测关节位置规划，夹爪目标沿用该步起点的开度。网页显示反馈正解得到的 ΔXYZ，旋转另显示姿态误差。
 
 通过网页连接 MuJoCo 或实机时，托管启动会带上用于规划的 MoveIt。
 若网页附着到独立启动的后端，点动使用同一 ROS 域内的 MoveIt，可用
 `ros2 launch b601_moveit_config move_group.launch.py hardware:=mujoco use_rviz:=false allow_trajectory_execution:=false`
 启动 MuJoCo 模型对应的规划服务。面板显示服务是否就绪。
-HTTP `POST /api/tcp_jog` 接收当前网页 `session_id`、公开 `session`、起始 `sequence`、
-`direction` 和 `distance_mm`。调用方按响应中的 `sequence` 继续递增发令。
-[验收](validation/target-web.md#网页六向-tcp-点动)
+
+#### 程序调用 TCP 原语
+
+HTTP 客户端通过 `/api/select` 获取 `session_id` 和公开的 `session`，执行期间向 `/api/heartbeat` 发送 `session_id`。向 `POST /api/tcp_jog` 发送两种会话标识、起始 `sequence` 和原语参数。平移用 `direction` 和 `distance_mm`，旋转用 `rotate_x`、`rotate_y` 或 `rotate_z` 作为 `direction`，角度字段为 `angle_deg`。下一次使用成功响应中的 `sequence + 1`。响应包含转发编号、目标与实测 XYZ、`xyzw` 顺序的四元数及 `angular_error_deg`。完成后通过 `/api/release` 释放会话。
+
+Python ROS 2 客户端可以复用 `b601_demos.tcp_motion.TcpPlanner`。按 `primitive()` 校验原语，调用 `plan()` 得到轨迹，再由 `targets()` 生成带时间间隔的七关节采样点。`TargetClient.set_joints()` 和 `TargetClient.publish()` 均可提交这些点。原生 ROS 2 客户端按同一轨迹通过 `/b601_target_arbiter/set_target` 服务或 `/b601_target_arbiter/target` 话题提交 `TargetFrame`，并维持会话与递增序号。SDK 和 ROS 2 的仲裁入口接收关节采样点，原语名由规划层解析。 [ROS 2 接口](#ros-2-接口) · [上层验收](validation/target-web.md#tcp-原语上层入口复测)
 
 ### 点动复测记录
 

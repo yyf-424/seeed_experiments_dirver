@@ -7,6 +7,7 @@ import re
 import signal
 import subprocess
 import time
+from math import cos, dist, radians, sin
 from pathlib import Path
 from threading import Event, Thread
 from urllib.error import HTTPError
@@ -122,9 +123,9 @@ class TestNode(Node):
         self.until(lambda: self.status.get("last_applied_id") == str(dispatch_id),
                    f"all routes must acknowledge dispatch {dispatch_id}")
 
-    def check_tff(self, arm, gripper, label):
+    def check_tff(self, arm, gripper, label, *, timeout=2):
         self.until(lambda: self.ff.get(ARM, [])[12:18] == arm
-                   and self.ff.get(GRIPPER, [])[2:] == [gripper], label, timeout=2)
+                   and self.ff.get(GRIPPER, [])[2:] == [gripper], label, timeout=timeout)
 
     def check_compensation(self, label, *, gravity=None, friction=None, finger_friction=None):
         def matches():
@@ -428,7 +429,7 @@ def test_http_and_cli(node, port, positions=None):
         "--gravity-source", "external", "--gravity-api", GRAVITY_API,
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
         try:
-            node.check_tff(arm, 0.1, "CLI must apply both task feedforward groups")
+            node.check_tff(arm, 0.1, "CLI must apply both task feedforward groups", timeout=TIMEOUT)
             node.until(lambda: process.poll() is not None, "CLI must complete")
         finally:
             if process.poll() is None:
@@ -727,6 +728,17 @@ def test_stiffness_switching(node, enabled, port=None):
     print(f"PASS MIT startup switch {enabled}: joint1 Kp {high} → {low if enabled else high}")
 
 
+def check_base_rotation(before, after, axis, angle, tolerance):
+    x, y, z, w = before
+    a, b, c, d = after
+    # The relative rotation in base coordinates is after * inverse(before).
+    delta = [a*w - d*x - b*z + c*y, b*w - d*y - c*x + a*z,
+             c*w - d*z - a*y + b*x, d*w + a*x + b*y + c*z]
+    expected = [0.0, 0.0, 0.0, cos(radians(angle) / 2)]
+    expected[axis] = sin(radians(angle) / 2)
+    assert min(dist(delta, expected), dist(delta, [-value for value in expected])) < tolerance, delta
+
+
 def test_web_tcp_reference(node, port):
     def request(path, payload=None):
         data = json.dumps(payload).encode() if payload is not None else None
@@ -752,25 +764,25 @@ def test_web_tcp_reference(node, port):
                    "web authority must be visible")
         seq = 1
 
-        def jog(direction, distance):
+        def jog(direction, **amount):
             nonlocal seq
             reply = request("tcp_jog", {**token, "session": session["session"], "sequence": seq,
-                                        "direction": direction, "distance_mm": distance})
+                                        "direction": direction, **amount})
             seq = reply["sequence"] + 1
             return reply
 
-        first = jog("forward", 8.0)
+        first = jog("forward", distance_mm=8.0)
         assert first["reference_source"] == "feedback", first
         assert request("gravity_source", {"source": "external"})["accepted"]
         node.until(lambda: request("state")["gravity_selection"]["effective"] == "external",
                    "gravity switching must remain available during the TCP session")
         try:
-            jog("left", 1200.0)
+            jog("left", distance_mm=1200.0)
         except HTTPError as error:
             assert error.code == 409
         else:
             raise AssertionError("unreachable TCP target was accepted")
-        second = jog("left", 8.0)
+        second = jog("left", distance_mm=8.0)
         assert second["reference_source"] == "previous_tcp_goal", second
         assert second["reference_xyz_mm"] == first["goal_xyz_mm"], second
         x, y, z = first["goal_xyz_mm"]
@@ -782,6 +794,15 @@ def test_web_tcp_reference(node, port):
             return sources.get("gravity", {}).get("joint1") == source
 
         node.until(lambda: joint1_gravity_is("external"), "TCP target must retain external gravity")
+        rotate = jog("rotate_z", angle_deg=-5.0)
+        assert rotate["reference_source"] == "previous_tcp_goal" and rotate["angle_deg"] == -5.0, rotate
+        assert rotate["goal_xyz_mm"] == second["goal_xyz_mm"], rotate
+        check_base_rotation(second["goal_orientation_xyzw"], rotate["goal_orientation_xyzw"], 2, -5, 1e-7)
+        assert rotate["terminal_error_mm"] < 0.8 and rotate["angular_error_deg"] < 0.4, rotate
+        shifted = jog("right", distance_mm=5.0)
+        assert shifted["reference_xyz_mm"] == rotate["goal_xyz_mm"], shifted
+        assert shifted["goal_orientation_xyzw"] == rotate["goal_orientation_xyzw"], shifted
+        node.until(lambda: joint1_gravity_is("external"), "rotation and translation must retain external gravity")
         assert request("gravity_source", {"source": "internal"})["accepted"]
         node.until(lambda: joint1_gravity_is("internal"),
                    "gravity must return to internal in the same TCP session")
@@ -790,24 +811,24 @@ def test_web_tcp_reference(node, port):
         direct = request("target", {**token, "sequence": seq, "positions": positions})
         seq += 1
         node.applied(direct["dispatch_id"])
-        third = jog("right", 5.0)
-        assert third["reference_source"] == "feedback", third
+        after_direct = jog("right", distance_mm=5.0)
+        assert after_direct["reference_source"] == "feedback", after_direct
         recording = Path(request("state")["tcp_jog"]["recording_path"])
 
         def recorded():
             with recording.open() as stream:
                 lines = stream.readlines()
             events = [json.loads(line) for line in lines if line.endswith("\n")]
-            return any(event["event"] == "web_result" and event["path"] == "/api/tcp_jog"
-                       and event["payload"].get("dispatch_id") == second["dispatch_id"]
-                       for event in events)
+            recorded = {event["payload"].get("dispatch_id") for event in events
+                        if event["event"] == "web_result" and event["path"] == "/api/tcp_jog"}
+            return {second["dispatch_id"], rotate["dispatch_id"]} <= recorded
 
         node.until(recorded, "TCP result must appear in the visible log file")
     finally:
         stop.set()
         thread.join()
         request("release", token)
-    print("PASS web TCP references, log recording, gravity switching and joint commands share one session")
+    print("PASS Web rotation, translation, logging, gravity switching and joint targets share one session")
 
 
 def test_tcp_primitives(node, output, http_port=None):
@@ -878,10 +899,28 @@ def test_tcp_primitives(node, output, http_port=None):
         for row, sign in zip(steps, (1, -1)):
             dx, dy, dz = row["delta_xyz_mm"]
             assert sign * dz > max(abs(dx), abs(dy)), row
-        (output / "tcp-primitives.json").write_text(json.dumps(
-            {"preview": preview, "square": square, "repeat": repeat, "vertical": vertical},
-            indent=2) + "\n")
         print("PASS up and down follow the base Z axis")
+
+        run("rotate_x", "0", error="目标姿态必须改变")
+        run("rotate_y", "nan", error="角度需要是有限数")
+        rotation = run("--execute", "rotate_x", "5", "rotate_y", "-5", "rotate_z", "5")
+        planned = [row for row in rotation if row["event"] == "planned"]
+        turned = [row for row in rotation if row["event"] == "executed"]
+        assert [row["direction"] for row in turned] == ["rotate_x", "rotate_y", "rotate_z"], rotation
+        fixed_xyz = rotation[0]["measured_xyz_mm"]
+        previous = rotation[0]["measured_orientation_xyzw"]
+        for axis, angle, goal, feedback in zip(range(3), (5, -5, 5), planned, turned):
+            assert goal["target_xyz_mm"] == fixed_xyz, goal
+            target_quaternion = goal["target_orientation_xyzw"]
+            check_base_rotation(previous, target_quaternion, axis, angle, 1e-7)
+            check_base_rotation(previous, feedback["measured_orientation_xyzw"], axis, angle, 0.0035)
+            assert dist(fixed_xyz, feedback["measured_xyz_mm"]) < 0.8, feedback
+            previous = target_quaternion
+        print("PASS fixed-position base X, Y and Z rotations with pose feedback")
+        (output / "tcp-primitives.json").write_text(json.dumps(
+            {"preview": preview, "square": square, "repeat": repeat, "vertical": vertical,
+             "rotation": rotation},
+            indent=2) + "\n")
         if http_port:
             test_web_tcp_reference(node, http_port)
     finally:

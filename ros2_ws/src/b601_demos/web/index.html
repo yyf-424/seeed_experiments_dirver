@@ -125,6 +125,21 @@
             <button type="button" class="quiet" data-tcp-direction="right" disabled>右 <span>−Y</span></button>
             <button type="button" class="quiet" data-tcp-direction="down" disabled>下 <span>−Z</span></button>
           </div>
+          <div class="tcp-jog-head tcp-rotation-head">
+            <h3 id="tcp-rotation-title">原地旋转</h3>
+            <label class="tcp-step" for="tcp-angle">
+              角度（°）
+              <input id="tcp-angle" type="number" value="5" min="0" step="any" required disabled>
+            </label>
+          </div>
+          <div class="tcp-directions" aria-labelledby="tcp-rotation-title">
+            <button type="button" class="quiet" data-tcp-direction="rotate_x" data-turn-sign="1" aria-label="绕基座 X 轴正转" disabled>绕 <span>+X</span></button>
+            <button type="button" class="quiet" data-tcp-direction="rotate_y" data-turn-sign="1" aria-label="绕基座 Y 轴正转" disabled>绕 <span>+Y</span></button>
+            <button type="button" class="quiet" data-tcp-direction="rotate_z" data-turn-sign="1" aria-label="绕基座 Z 轴正转" disabled>绕 <span>+Z</span></button>
+            <button type="button" class="quiet" data-tcp-direction="rotate_x" data-turn-sign="-1" aria-label="绕基座 X 轴反转" disabled>绕 <span>−X</span></button>
+            <button type="button" class="quiet" data-tcp-direction="rotate_y" data-turn-sign="-1" aria-label="绕基座 Y 轴反转" disabled>绕 <span>−Y</span></button>
+            <button type="button" class="quiet" data-tcp-direction="rotate_z" data-turn-sign="-1" aria-label="绕基座 Z 轴反转" disabled>绕 <span>−Z</span></button>
+          </div>
           <p id="tcp-jog-status" class="tcp-jog-status" role="status"></p>
           <details id="tcp-recording" class="tcp-recording" hidden>
             <summary>操作与反馈日志</summary>

@@ -11,6 +11,7 @@ const connectButton = element("connect");
 const disableButton = element("disable");
 const recenterButton = element("recenter");
 const tcpDistance = element("tcp-distance");
+const tcpAngle = element("tcp-angle");
 const tcpButtons = document.querySelectorAll("[data-tcp-direction]");
 const tcpLabels = { forward: "前", backward: "后", left: "左", right: "右", up: "上", down: "下" };
 const stiffnessLabels = { high: "高刚度", low: "低刚度" };
@@ -280,6 +281,7 @@ function refreshTcp(ready, allowed) {
   const available = allowed && jog?.ready;
   for (const button of tcpButtons) button.disabled = !available;
   tcpDistance.disabled = busy || !ready;
+  tcpAngle.disabled = busy || !ready;
   if (jog) tcpDistance.min = jog.min_distance_mm;
   const recording = element("tcp-recording");
   const recordingPath = jog?.recording_path || "";
@@ -292,31 +294,37 @@ function refreshTcp(ready, allowed) {
     : !jog?.planner_ready ? "等待 MoveIt 规划服务。"
     : !jog.ready ? "等待 MIT 控制器、关节反馈和安全状态。"
     : !session || snapshot.status?.session !== session.publicId ? "请先指定网页控制权。"
-    : tcpReply?.message || "点击执行一步，保持工具姿态。";
+    : tcpReply?.message || "平移保持姿态，旋转保持 TCP 位置。";
   output.dataset.error = String(!!tcpReply?.error);
   if (output.textContent !== message) output.textContent = message;
 }
 
-async function jogTcp(direction) {
-  if (!tcpDistance.reportValidity()) return;
+async function jogTcp(button) {
+  const { tcpDirection: direction, turnSign } = button.dataset;
+  const rotating = turnSign !== undefined;
+  const input = rotating ? tcpAngle : tcpDistance;
+  if (!input.reportValidity()) return;
   const current = session;
-  const distance = tcpDistance.valueAsNumber;
-  const label = tcpLabels[direction];
+  const amount = input.valueAsNumber;
+  const label = rotating ? `绕 ${direction.at(-1).toUpperCase()} 轴${turnSign === "1" ? "正转" : "反转"}`
+    : `向${tcpLabels[direction]}点动`;
   const viewBefore = displayedTcpTarget;
   const sequence = ++current.sequence;
   let dispatchId;
   tcpPending = true;
-  tcpReply = { message: `正在向${label}点动 ${distance} mm…` };
+  tcpReply = { message: `正在${label} ${amount} ${rotating ? "°" : "mm"}…` };
   refresh();
   try {
     const result = await api("/api/tcp_jog", {
       session_id: current.id, session: current.publicId, sequence,
-      direction, distance_mm: distance, view_before: viewBefore,
+      direction, view_before: viewBefore,
+      ...(rotating ? { angle_deg: Number(turnSign) * amount } : { distance_mm: amount }),
     });
     current.sequence = Math.max(current.sequence, result.sequence);
     dispatchId = result.dispatch_id;
     const delta = result.delta_xyz_mm.map((value) => value.toFixed(2));
-    tcpReply = { message: `向${label}完成 · 回读 ΔXYZ（mm）${delta.join(" / ")}` };
+    const angleError = rotating ? ` · 姿态误差 ${result.angular_error_deg.toFixed(2)}°` : "";
+    tcpReply = { message: `${label}完成 · 回读 ΔXYZ（mm）${delta.join(" / ")}${angleError}` };
   } catch (error) {
     if (Number.isInteger(error.sequence)) current.sequence = Math.max(current.sequence, error.sequence);
     tcpReply = { error: true, message: error.message };
@@ -536,7 +544,7 @@ element("sync").addEventListener("click", () => {
   refresh();
 });
 for (const button of tcpButtons) {
-  button.addEventListener("click", () => mutate(() => jogTcp(button.dataset.tcpDirection)));
+  button.addEventListener("click", () => mutate(() => jogTcp(button)));
 }
 element("send-all").addEventListener("click", () => mutate(sendTargets));
 window.addEventListener("pagehide", () => setSession(undefined));

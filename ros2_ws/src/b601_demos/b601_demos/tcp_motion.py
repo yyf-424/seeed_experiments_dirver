@@ -1,10 +1,10 @@
 """Shared planning and timed joint references for base-frame TCP primitives."""
 from copy import deepcopy
 from dataclasses import dataclass
-from math import isfinite
+from math import atan2, ceil, cos, degrees, fmod, hypot, isfinite, radians, sin
 
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import Pose, PoseStamped, Quaternion
 from moveit_msgs.msg import MoveItErrorCodes, PositionIKRequest, RobotState
 from moveit_msgs.srv import GetCartesianPath, GetPositionFK, GetPositionIK
 from sensor_msgs.msg import JointState
@@ -22,12 +22,13 @@ DIRECTIONS = {
     "up": ("z", 1),
     "down": ("z", -1),
 }
+ROTATION_AXES = {"rotate_x": 0, "rotate_y": 1, "rotate_z": 2}
 
 
 @dataclass
 class Segment:
     direction: str
-    distance_mm: float
+    amount: float
     goal_pose: Pose
     trajectory: JointTrajectory
 
@@ -35,21 +36,72 @@ class Segment:
     def goal(self):
         return xyz(self.goal_pose)
 
+    @property
+    def motion(self):
+        return {"direction": self.direction, amount_key(self.direction): self.amount}
+
 
 MIN_DISTANCE_MM = 0.1
 
 
 def primitive(direction, raw):
-    if direction not in DIRECTIONS:
-        raise ValueError(f"未知方向 {direction}，可用方向为 {'、'.join(DIRECTIONS)}")
-    distance = float(raw)
-    if isinstance(raw, bool) or not isfinite(distance) or distance < MIN_DISTANCE_MM:
+    if direction not in DIRECTIONS and direction not in ROTATION_AXES:
+        raise ValueError(f"未知原语 {direction}，可用原语为 {'、'.join((*DIRECTIONS, *ROTATION_AXES))}")
+    amount = float(raw)
+    finite = not isinstance(raw, bool) and isfinite(amount)
+    if direction in ROTATION_AXES:
+        if not finite or not fmod(amount, 360):
+            raise ValueError("旋转角度需要是有限数，且目标姿态必须改变")
+    elif not finite or amount < MIN_DISTANCE_MM:
         raise ValueError(f"距离需要是至少 {MIN_DISTANCE_MM:g} mm 的有限数")
-    return direction, distance
+    return direction, amount
+
+
+def amount_key(direction):
+    return "angle_deg" if direction in ROTATION_AXES else "distance_mm"
 
 
 def xyz(pose):
     return [pose.position.x, pose.position.y, pose.position.z]
+
+
+def orientation(pose):
+    q = pose.orientation
+    return [q.x, q.y, q.z, q.w]
+
+
+def angular_error_deg(goal, measured):
+    reference, actual = orientation(goal), orientation(measured)
+    if sum(a * b for a, b in zip(reference, actual)) < 0:
+        actual = [-value for value in actual]
+    difference = hypot(*(a - b for a, b in zip(reference, actual)))
+    total = hypot(*(a + b for a, b in zip(reference, actual)))
+    return degrees(4 * atan2(difference, total))
+
+
+def rotation_waypoints(reference, axis, angle):
+    # Keep each interpolation below 180° so MoveIt follows the requested sign.
+    angle = fmod(angle, 360)
+    steps = max(1, ceil(abs(angle) / 120))
+    x, y, z, w = orientation(reference)
+    vector = [x, y, z]
+    j, k = (axis + 1) % 3, (axis + 2) % 3
+    waypoints = []
+    for index in range(1, steps + 1):
+        half_angle = radians(angle * index / steps) / 2
+        s, c = sin(half_angle), cos(half_angle)
+        # q_delta * q_reference expresses the rotation in the base frame.
+        rotated = vector.copy()
+        rotated[axis] = c * vector[axis] + s * w
+        rotated[j] = c * vector[j] - s * vector[k]
+        rotated[k] = c * vector[k] + s * vector[j]
+        scalar = c * w - s * vector[axis]
+        norm = hypot(*rotated, scalar)
+        waypoint = deepcopy(reference)
+        qx, qy, qz = (value / norm for value in rotated)
+        waypoint.orientation = Quaternion(x=qx, y=qy, z=qz, w=scalar / norm)
+        waypoints.append(waypoint)
+    return waypoints
 
 
 class TcpPlanner:
@@ -122,22 +174,29 @@ class TcpPlanner:
         origin = self.fk_pose(positions)
         goal = deepcopy(origin if reference is None else reference)
         segments = []
-        for index, (direction, distance) in enumerate(primitives, 1):
-            axis, sign = DIRECTIONS[direction]
-            setattr(goal.position, axis, getattr(goal.position, axis) + sign * distance / 1000)
+        for index, (direction, amount) in enumerate(primitives, 1):
+            if direction in ROTATION_AXES:
+                waypoints = rotation_waypoints(goal, ROTATION_AXES[direction], amount)
+                goal = waypoints[-1]
+            else:
+                axis, sign = DIRECTIONS[direction]
+                setattr(goal.position, axis, getattr(goal.position, axis) + sign * amount / 1000)
+                waypoints = [goal]
             state = self.robot_state(positions)
             request = GetCartesianPath.Request(
                 header=Header(frame_id=BASE), start_state=state,
-                group_name="arm", link_name=TCP, waypoints=[goal],
+                group_name="arm", link_name=TCP, waypoints=waypoints,
                 max_step=0.005, avoid_collisions=True,
                 max_velocity_scaling_factor=1.0, max_acceleration_scaling_factor=1.0,
             )
             answer = self.call(self.cartesian, request, self.planning_timeout)
             trajectory = answer.solution.joint_trajectory
             if (answer.error_code.val != MoveItErrorCodes.SUCCESS or answer.fraction != 1.0
-                    or set(trajectory.joint_names) != set(self.arm) or not trajectory.points):
+                    or set(trajectory.joint_names) != set(self.arm) or not trajectory.points
+                    or (len(waypoints) > 1 and len(trajectory.points) == 1)):
+                unit = "°" if direction in ROTATION_AXES else "mm"
                 raise RuntimeError(
-                    f"第 {index} 段 {direction} {distance:g} mm 规划未完成"
+                    f"第 {index} 段 {direction} {amount:g} {unit} 规划未完成"
                     f"（fraction={answer.fraction:.3f}，错误码={answer.error_code.val}）")
             if len(trajectory.points) == 1:
                 trajectory = self.short_path(state, goal, positions, index)
@@ -145,5 +204,5 @@ class TcpPlanner:
             if all(end[name] == positions[name] for name in self.arm):
                 raise RuntimeError(f"第 {index} 段 {direction} 的规划终点未产生关节位移")
             positions.update(end)
-            segments.append(Segment(direction, distance, deepcopy(goal), trajectory))
+            segments.append(Segment(direction, amount, deepcopy(goal), trajectory))
         return origin, segments

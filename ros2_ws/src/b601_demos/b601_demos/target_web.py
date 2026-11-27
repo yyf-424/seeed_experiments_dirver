@@ -36,7 +36,7 @@ from .mit_recenter_client import recenter_result_timeout
 from .mit_target import make_mit_target, measured_positions, positions_from_deltas
 from .gravity_provider import GravityProvider
 from .target_arbiter import ARBITER
-from .tcp_motion import BASE, MIN_DISTANCE_MM, TCP, TcpPlanner, primitive, xyz
+from .tcp_motion import BASE, MIN_DISTANCE_MM, TCP, TcpPlanner, amount_key, angular_error_deg, orientation, primitive, xyz
 from .web_backend import WebBackend
 from .web_recording import WebRecording
 from .web_robot_model import build_model, find_vendor_model
@@ -385,7 +385,8 @@ class TargetWeb(Node):
             time.sleep(min(remaining, self.tcp_poll))
 
     def request_tcp_jog(self, data, operation_id):
-        move = primitive(data["direction"], data["distance_mm"])
+        direction = data["direction"]
+        move = primitive(direction, data[amount_key(direction)])
         public_id = data["session"]
         session_id = data["session_id"]
         sequence = data["sequence"]
@@ -408,14 +409,18 @@ class TargetWeb(Node):
             reference = previous[2] if use_previous else None
             origin, (segment,) = self.tcp.plan([move], initial, reference=reference)
             origin_xyz = xyz(origin)
-            reference_xyz_mm = [value * 1000 for value in xyz(reference if reference is not None else origin)]
-            reference_source = "previous_tcp_goal" if use_previous else "feedback"
-            goal_xyz_mm = [value * 1000 for value in segment.goal]
+            reference_pose = reference if use_previous else origin
+            target = {
+                **segment.motion,
+                "goal_xyz_mm": [value * 1000 for value in segment.goal],
+                "goal_orientation_xyzw": orientation(segment.goal_pose),
+                "reference_xyz_mm": [value * 1000 for value in xyz(reference_pose)],
+                "reference_orientation_xyzw": orientation(reference_pose),
+                "reference_source": "previous_tcp_goal" if use_previous else "feedback",
+            }
             self.recording.add(
                 "tcp_plan", operation_id=operation_id, frame=BASE, tcp=TCP,
-                direction=move[0], distance_mm=move[1],
-                origin_xyz_mm=[value * 1000 for value in origin_xyz], goal_xyz_mm=goal_xyz_mm,
-                reference_xyz_mm=reference_xyz_mm, reference_source=reference_source,
+                origin_xyz_mm=[value * 1000 for value in origin_xyz], **target,
             )
             dispatch = None
             for delay, positions in self.tcp.targets(segment, initial[self.tcp.gripper]):
@@ -435,14 +440,16 @@ class TargetWeb(Node):
             self.tcp_wait(public_id, self.tcp_ack_timeout, dispatch)
             self.tcp_reference = (public_id, dispatch, segment.goal_pose)
             feedback = self.tcp_wait(public_id, self.tcp_settle)
-            actual = xyz(self.tcp.fk_pose(feedback))
+            actual_pose = self.tcp.fk_pose(feedback)
+            actual = xyz(actual_pose)
             terminal_error_mm = dist(actual, segment.goal) * 1000
             return HTTPStatus.OK, {
                 "accepted": True, "sequence": sequence - 1, "dispatch_id": dispatch,
-                "frame": BASE, "tcp": TCP, "direction": move[0], "distance_mm": move[1],
+                "frame": BASE, "tcp": TCP, **target,
                 "delta_xyz_mm": [(end - start) * 1000 for start, end in zip(origin_xyz, actual)],
-                "goal_xyz_mm": goal_xyz_mm, "measured_xyz_mm": [value * 1000 for value in actual],
-                "reference_xyz_mm": reference_xyz_mm, "reference_source": reference_source,
+                "measured_xyz_mm": [value * 1000 for value in actual],
+                "measured_orientation_xyzw": orientation(actual_pose),
+                "angular_error_deg": angular_error_deg(segment.goal_pose, actual_pose),
                 "terminal_error_mm": terminal_error_mm, "terminal_squared_error_mm2": terminal_error_mm**2,
             }
         except RuntimeError as error:

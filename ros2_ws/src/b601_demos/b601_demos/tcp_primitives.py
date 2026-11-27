@@ -94,10 +94,18 @@ class TcpPrimitives(Node):
         self.check_execution()
         return dispatch, self.planner.fk_pose(self.sample())
 
-    def run(self, primitives, execute):
+    def run(self, primitives, execute, *, gravity_source=None, gravity_api=None):
+        if execute and gravity_source:
+            # Import the model before taking the short motion lease. The source
+            # changes only after this client obtains control.
+            self.target.gravity.select_source(gravity_source, gravity_api, apply=False)
         self.wait_until(
             self.planner.ready,
             self.planning_timeout, "MoveIt 运动学和笛卡尔路径服务未就绪",
+        )
+        self.wait_until(
+            lambda: self.sample() is not None,
+            self.planning_timeout, "未收到完整且新鲜的关节位置反馈",
         )
         if execute:
             self.wait_until(lambda: self.safety is not None, self.planning_timeout, "未收到整机安全状态")
@@ -111,10 +119,18 @@ class TcpPrimitives(Node):
             self.target.select(self.planning_timeout)
             self.wait_until(lambda: self.arbiter_status.get("source") == self.target.source,
                             self.service_timeout, "未收到整机目标会话状态")
-        self.wait_until(
-            lambda: self.sample() is not None,
-            self.planning_timeout, "未收到完整且新鲜的关节位置反馈",
-        )
+            if gravity_source:
+                self.target.set_gravity_source(gravity_source, gravity_api)
+
+                def gravity_ready():
+                    status = self.target.gravity.snapshot()
+                    if status["error"]:
+                        raise RuntimeError(status["error"])
+                    return (not status["pending"]
+                            and status["selected"] == status["effective"] == gravity_source)
+
+                self.wait_until(gravity_ready, self.service_timeout,
+                                f"未确认重力补偿来源 {gravity_source}", executing=True)
         initial = self.sample()
         origin, segments = self.planner.plan(primitives, initial)
         report(event="start", frame=BASE, tcp=TCP, measured_xyz_mm=[value * 1000 for value in xyz(origin)],
@@ -142,8 +158,14 @@ class TcpPrimitives(Node):
 def main():
     parser = argparse.ArgumentParser(description="规划基座坐标系内的 TCP 平移与旋转原语组合")
     parser.add_argument("--execute", action="store_true", help="通过已运行的 MIT 目标仲裁执行")
+    parser.add_argument("--gravity-source", choices=("internal", "external"), help="执行时选择重力补偿来源")
+    parser.add_argument("--gravity-api", help="外部重力工厂，格式 module:factory")
     parser.add_argument("primitives", nargs="+", metavar="原语 数值")
     args = parser.parse_args()
+    if (args.gravity_source or args.gravity_api) and not args.execute:
+        parser.error("选择重力补偿来源需要 --execute")
+    if (args.gravity_source == "external") != bool(args.gravity_api):
+        parser.error("--gravity-source external 与 --gravity-api 必须一起指定")
     try:
         primitives = parse_primitives(args.primitives)
     except ValueError as error:
@@ -153,7 +175,7 @@ def main():
     node = TcpPrimitives(load_project_config())
     succeeded = False
     try:
-        node.run(primitives, args.execute)
+        node.run(primitives, args.execute, gravity_source=args.gravity_source, gravity_api=args.gravity_api)
         succeeded = True
     except (RuntimeError, ValueError, KeyboardInterrupt, ExternalShutdownException) as error:
         node.get_logger().error(str(error) or "TCP 原语组合已中断")

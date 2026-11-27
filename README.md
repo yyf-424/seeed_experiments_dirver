@@ -10,6 +10,8 @@ MoveIt 2 提供标准位置轨迹规划，MuJoCo 提供动力学仿真。
 
 v1.1.2 支持持续外部重力补偿、停更回退和手动切换。网页外力估计默认关闭，显式配置估计器后启用。 [启动与切换](#在上层启动时选择重力来源) · [网页外力估计](#网页外力估计) · [发布记录](CHANGELOG.md)
 
+主分支新增基座 TCP 平移与原地旋转、标准 MIT 定时轨迹和可配置的稳态任务积分。 [原语](#tcp-原语组合) · [定时轨迹](#mit-定时轨迹) · [任务积分](#mit-稳态任务积分)
+
 ## 演示
 
 框架支持电机侧 MIT 重力补偿与变刚度控制。网页可渲染 B601-DM 官方三维模型、连接 MuJoCo 或实机并发送关节目标。
@@ -304,7 +306,7 @@ PYTHONPATH="$PWD/../gravity_identification${PYTHONPATH:+:$PYTHONPATH}" \
   -p gravity_api:=neural_network.feedforward:GaussianFeedforward.load
 ```
 
-MoveIt 挂接时传 `start_mit_trajectory:=false` 复用该执行器，`hardware` 取现有后端。需要夹爪读数时，在同一域 [单独启动负载节点](#不开网页时读取夹爪估计)，并订阅 `/b601_load/estimates`。
+MoveIt 挂接时传 `start_mit_trajectory:=false` 复用该执行器，`hardware` 取现有后端。可在同一域单独启动负载节点并订阅 `/b601_load/estimates`。同一后端的 TCP 原语和定时轨迹共用控制权。 [负载节点](#不开网页时读取夹爪估计) · [联合复测](validation/target-web.md#非-web-上层与-mit-仲裁联合复测)
 
 #### 结束轨迹会话
 
@@ -396,7 +398,7 @@ PYTHONPATH="$B601_LOAD_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
   -p load_api:=b601_load_id.gripper_load_api:create_provider
 ```
 
-在另一终端加载相同环境后，订阅 `ros2 topic echo /b601_load/estimates --qos-reliability best_effort`。MIT 回路仍可通过 SDK、命令行、原生 ROS 2 或归中入口选择外部重力。MoveIt 的 `pos_vel` 回路可读取夹爪估计。MIT 外部重力需要 MIT 控制器及桥接器。 [非 Web MuJoCo 复测](validation/target-web.md#非-web-上层接口复测)
+在另一终端加载相同环境后，订阅 `ros2 topic echo /b601_load/estimates --qos-reliability best_effort`。在 MIT 后端上，TCP CLI、SDK、原生 ROS 2、MIT 归中和 MoveIt 标准轨迹可与独立负载节点同时运行。显式选择 `pos_vel` 的 MoveIt 也可读取估计。 [MIT 联合复测](validation/target-web.md#非-web-上层与-mit-仲裁联合复测)
 
 ##### 位置与参考系
 
@@ -497,13 +499,81 @@ python3 scripts/dm_mit_move.py --set 'joint1=0.035'
 | `tff` | N·m | N |
 | `gravity_ff`、`friction_ff` | N·m | N |
 
-每帧省略 `tff` 时，任务前馈立即归零。MIT 前馈等于重力补偿、摩擦补偿和任务前馈之和。
+每帧省略 `tff` 时，外部任务前馈立即归零。MIT 前馈为重力、摩擦、外部任务前馈和控制器的任务积分力矩之和。
 原 `~/task_torque` 的发送方可迁移到同一目标帧的 `JointState.effort`，由整机会话与序号统一仲裁。
 非零任务前馈在最近一次目标采纳后默认有效 0.5 秒。只发会话心跳时，该项仍按时归零。
 SDK 支持局部编辑，首次用实测反馈补齐七关节，后续沿用同一会话已发出的其它位置。
 `set_joints(..., velocities={...}, tff={...})` 按名称传入可选量，省略的关节取零。
 会话令牌用于命令和释放，状态话题只公布独立的公开编号。`last_forwarded` 包含已转发的 `position`、`velocity`、`tff`、`gravity_ff` 和 `friction_ff`，可用 `last_applied_id` 对照两组控制器的采纳编号。ROS 域内的应用应部署为可信节点，
 若需隔离未经授权的参与者，由部署端设置 DDS/SROS2 发布与服务权限。
+
+### MIT 稳态任务积分
+
+控制器在位置参考完成斜坡、目标速度归零且当前目标会话仍有效时，按关节积分位置误差。积分附加力矩随同一个 MIT 帧发送。下一条已采纳目标、会话结束、进入低刚度等待档或停用控制器时，积分清零。归中使用原有控制律。
+
+默认增益和限幅都是零。在所用 MIT 控制器 YAML 的 `b601_mit_arm.ros__parameters` 下填写以下数组即可只启用 J3。顺序对应 `joints`。Ki 的手臂单位为 N·m/(rad·s)，幅值限幅单位为 N·m。限幅在配置控制器时读取，Ki 支持运行时调整。
+
+```yaml
+task_integral_limit: [0.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+task_integral_ki:    [0.0, 0.0, 30.0, 0.0, 0.0, 0.0]
+```
+
+```bash
+ros2 param set /b601_mit_arm task_integral_ki '[0.0, 0.0, 30.0, 0.0, 0.0, 0.0]'
+ros2 topic echo /b601_mit_arm/task_integral
+```
+
+### 实验配置 J3 Ki=38
+
+六轴手动 TCP 点动参数保存为独立 YAML。该配置保持高刚度，J3 的 Ki 为 38、积分幅值为 2.0 N·m。默认控制器的积分增益与幅值为零。 [参数片段](validation/experiments/2026-11-27-tcp-ki38.yaml) · [实机对照](validation/target-web.md#mit-任务积分与-j3-ki38-实机记录)
+
+在新终端从当前检出目录加载环境，再将实验参数叠加到本次 Web 启动所用的实机 MIT 配置。
+
+```bash
+source scripts/ros_env.sh && b601_source_workspace
+python3 - <<'PY'
+from pathlib import Path
+from shutil import copytree, ignore_patterns
+
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+package = "b601_bringup"
+config = Path("config/b601_mit_controllers_gravity.yaml")
+share = Path(get_package_share_directory(package))
+patch = Path("validation/experiments/2026-11-27-tcp-ki38.yaml")
+params = yaml.safe_load((share / config).read_text())
+arm = params["b601_mit_arm"]["ros__parameters"]
+arm.update(yaml.safe_load(patch.read_text())["b601_mit_arm"]["ros__parameters"])
+
+overlay = Path(".verify/tcp-ki38-overlay")
+overlay_share = overlay / "share" / package
+copytree(share, overlay_share, dirs_exist_ok=True, ignore=ignore_patterns(config.name))
+output = overlay_share / config
+output.write_text(yaml.safe_dump(params, sort_keys=False))
+marker = overlay / "share/ament_index/resource_index/packages" / package
+marker.parent.mkdir(parents=True, exist_ok=True)
+marker.touch()
+PY
+```
+
+在同一终端启动预览。将 `seeed_root` 改为两个外部辨识项目所在的目录。网页内连接实机前按项目约定完成现场确认，收尾先归中再 Disable。
+
+```bash
+seeed_root=/path/to/seeed
+export ROS_DOMAIN_ID=202 ROS_LOCALHOST_ONLY=1
+export AMENT_PREFIX_PATH="$PWD/.verify/tcp-ki38-overlay:$AMENT_PREFIX_PATH"
+export PYTHONPATH="$seeed_root/gravity_identification:$seeed_root/load_identification${PYTHONPATH:+:$PYTHONPATH}"
+export B601_WEB_RECORD_DIR="$PWD/.verify/web-recordings/ki38-$(date +%Y%m%d-%H%M%S)"
+export ROS_LOG_DIR="$B601_WEB_RECORD_DIR/ros"
+mkdir -p "$ROS_LOG_DIR"
+ros2 launch b601_demos target_web.launch.py \
+  port:=8940 mit_stiffness_switching:=false \
+  gravity_source:=external gravity_api:=neural_network.feedforward:GaussianFeedforward.load \
+  load_positions:=gripper load_api:=b601_load_id.gripper_load_api:create_provider
+```
+
+打开 [实验预览](http://127.0.0.1:8940/)。实机连接后可用 `ros2 param get /b601_mit_arm task_integral_ki` 核对六轴增益。网页会话日志与实机驱动 CSV 写入 `B601_WEB_RECORD_DIR`。
 
 ### 相对关节目标
 
@@ -531,7 +601,7 @@ HTTP `POST /api/delta_target` 接收 `session_id`、递增的 `sequence` 和按�
 
 #### TCP 平移原语组合
 
-`codex/tcp-primitives` 提供 `ros2 run b601_demos tcp_primitives`。在 `base_link` 下定义六个方向。
+使用 `ros2 run b601_demos tcp_primitives`。在 `base_link` 下定义六个方向。
 `forward` / `backward` 对应 ±X，`left` / `right` 对应 ±Y，`up` / `down` 对应 ±Z。
 每个方向后跟距离（mm），最小输入为 0.1 mm。组合从当时的关节反馈求出 `end_link` 位姿，依次叠加同一基座系中的位移，每段保持起始工具姿态。
 
@@ -550,6 +620,16 @@ ros2 run b601_demos tcp_primitives forward 20 left 20 backward 20 right 20
 ```bash
 ros2 run b601_demos tcp_primitives --execute forward 20 left 20 backward 20 right 20
 ```
+
+执行时可显式选择重力补偿来源。使用外部高斯工厂时，先将 `gravity_identification` 检出目录加入 `PYTHONPATH`，并启动已开启重力补偿的 MIT 后端。
+
+```bash
+ros2 run b601_demos tcp_primitives --execute --gravity-source internal forward 3 rotate_z 3
+ros2 run b601_demos tcp_primitives --execute --gravity-source external \
+  --gravity-api neural_network.feedforward:GaussianFeedforward.load forward 3 rotate_z 3
+```
+
+省略来源选项时沿用当前生效的重力补偿。显式选择外部来源时，CLI 在控制会话内刷新重力样本，退出后按现有时效回退到内部。夹爪负载估计可在同一 ROS 域独立运行。 [负载节点](#不开网页时读取夹爪估计) · [联合复测](validation/target-web.md#非-web-上层与-mit-仲裁联合复测)
 
 下面的隔离回归自行启动 MoveIt 和 MuJoCo，覆盖六向平移、三轴旋转、连续参考、规划失败与网页混合点动。
 
@@ -623,7 +703,7 @@ gravity_ff = dict(zip(OUTPUT_JOINTS, model.predict(q)[0].tolist()))
 dispatch_id = client.set_joints(positions, 3.0, gravity_ff=gravity_ff)
 ```
 
-`/b601_mit_arm/ff` 和 `/b601_mit_gripper/ff` 按摩擦、重力、任务三段回读实际采用的值。两条原生 ROS 2 旧入口 `/target` 与 `/set_target` 仍支持位置、速度和任务前馈。
+`/b601_mit_arm/ff` 和 `/b601_mit_gripper/ff` 按摩擦、重力、任务三段回读实际采用的值。任务段包含外部任务前馈和控制器积分附加力矩。两条原生 ROS 2 旧入口 `/target` 与 `/set_target` 仍支持位置、速度和任务前馈。
 
 各控制器的 `~/compensation_sources` 按关节回读实际选用的来源。HTTP `/api/state` 的 `compensation_sources` 提供 `gravity` 和 `friction` 两个关节字典。重力状态可为 `disabled`、`internal` 或 `external`，摩擦状态可为 `internal` 或 `external`。等待可用回读时返回 `null`。
 
@@ -669,6 +749,8 @@ PYTHONPATH="$gravity_root${PYTHONPATH:+:$PYTHONPATH}" B601_LOAD_ROOT="$load_root
 | `scripts/start_mit_gravity.sh` 中的 MIT 归中 | 环境变量 `MIT_RECENTER_GRAVITY_SOURCE`、`MIT_RECENTER_GRAVITY_API` |
 | 自有 Python ROS 2 节点 | `TargetClient(node, source, gravity_source="external", gravity_api="module:factory")`，或为该节点设置 ROS 参数 `gravity_source`、`gravity_api` |
 | 手动 ROS 2 发令工具 `scripts/dm_mit_move.py` | `--gravity-source external --gravity-api module:factory` |
+| TCP 原语命令 `tcp_primitives` | `--execute --gravity-source external --gravity-api module:factory` |
+| MIT 定时轨迹执行器 `mit_trajectory` | ROS 参数 `gravity_source`、`gravity_api` |
 
 Web、SDK、手动 CLI 和归中共用重力来源选择。默认使用内部重力。显式选择外部后，提供者按实测姿态持续更新，控制器使用各轴的新鲜外部值。停更后各轴回到内部，外部流恢复后自动采用新值。手动选内部会清除当前外部选择。手动 CLI 退出会停止它的更新，随后回到内部。
 

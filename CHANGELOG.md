@@ -5,6 +5,8 @@
 - `ca73e33` 将 MoveIt 上层入口默认接到 MIT 的标准 `FollowJointTrajectory` action，支持手臂与夹爪同轨迹、实测反馈和取消持位。显式位置模式使用 JTC。 [启动与接口](README.md#mit-定时轨迹)
 - 实机双轴往返 action 成功。六轴往返确认各轴收到完整参考，J2 终点误差 12.97 mrad 超过 10 mrad 容差，J3 沿途峰值误差 24.98 mrad。两次均按实测归中并失能。 [实机六轴验收](validation/target-web.md#b601-dm-实机六轴往返)
 - TCP 点动支持 `base_link` 六向平移与绕 TCP 的 X/Y/Z 轴正反转。网页、CLI 和 HTTP 可组合两类原语，Python SDK 与原生 ROS 2 可共用规划结果。网页显示姿态误差，HTTP 与 JSONL 保存旋转参数和目标／实测姿态。 [用法](README.md#tcp-原语组合) · [上层验收](validation/target-web.md#tcp-原语上层入口复测) · [实机误差](validation/target-web.md#tcp-平移与旋转实机复测)
+- TCP CLI 可在获取控制权后选择内置重力或外部高斯工厂。物理 MuJoCo 在两种模式下完成 120 段非 Web TCP 原语，并复测独立夹爪估计、标准 MIT 轨迹和 13 项仲裁。 [联合验收](validation/target-web.md#非-web-上层与-mit-仲裁联合复测)
+- MIT 控制器支持逐轴稳态任务积分，诊断回读积分力矩。默认积分为零，实机六轴实验保留 J3 Ki=38 的独立配置。 [配置与启动](README.md#实验配置-j3-ki38) · [实机记录](validation/target-web.md#mit-任务积分与-j3-ki38-实机记录)
 - 新增外部 API 一键启动脚本，默认启用高斯重力补偿和夹爪负载辨识。每个 Web 会话记录操作、反馈、负载估计和补偿来源，网页托管实机时同时保存驱动反馈 CSV。 [启动与日志说明](README.md#外部-api-一键启动) · [MuJoCo 复测](validation/target-web.md#外部-api-一键启动与日志复测)
 
 ## v1.1.2 发布后补充复测 · 2026-11-27

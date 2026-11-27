@@ -91,6 +91,14 @@ bool param_to_doubles(const rclcpp::Parameter & p, std::vector<double> & out)
   return false;
 }
 
+bool valid_integral_parameter(const std::vector<double> & values, std::size_t size)
+{
+  return values.size() == size &&
+         std::all_of(values.begin(), values.end(), [](double value) {
+           return std::isfinite(value) && value >= 0.0;
+         });
+}
+
 /// 线性推进到目标（不越过）。刚度斜坡、目标斜坡都用它 —— 相比一阶滤波，
 /// 斜率是常数、到位时间可算，验收时能直接对表。
 double move_toward(double cur, double target, double max_step)
@@ -347,6 +355,23 @@ controller_interface::CallbackReturn B601MitController::on_init()
     }
     ensure("task_torque_timeout_sec", task_torque_timeout_sec_);
     task_torque_timeout_sec_ = node->get_parameter("task_torque_timeout_sec").as_double();
+    ensure("task_integral_ki", std::vector<double>(n, 0.0));
+    if (!node->has_parameter("task_integral_limit")) {
+      rcl_interfaces::msg::ParameterDescriptor descriptor;
+      descriptor.read_only = true;
+      node->declare_parameter("task_integral_limit", std::vector<double>(n, 0.0), descriptor);
+    }
+    const auto integral_gains = to_per_joint(
+      "task_integral_ki", node->get_parameter("task_integral_ki"), n);
+    task_integral_limit_ = to_per_joint(
+      "task_integral_limit", node->get_parameter("task_integral_limit"), n);
+    if (!valid_integral_parameter(integral_gains, n) ||
+      !valid_integral_parameter(task_integral_limit_, n))
+    {
+      RCLCPP_ERROR(node->get_logger(), "任务积分增益和幅值必须是有限的非负值");
+      return controller_interface::CallbackReturn::ERROR;
+    }
+    task_integral_gains_.writeFromNonRT(integral_gains);
     ensure("target_velocity_timeout_sec", target_velocity_timeout_sec_);
     target_velocity_timeout_sec_ = node->get_parameter("target_velocity_timeout_sec").as_double();
     if (!std::isfinite(task_torque_timeout_sec_) || task_torque_timeout_sec_ < 0.0 ||
@@ -427,7 +452,18 @@ rcl_interfaces::msg::SetParametersResult B601MitController::parameter_callback(
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;
   std::optional<bool> use_gravity;
+  std::optional<std::vector<double>> integral_gains;
   const std::size_t n = joint_names_.size();
+  for (const auto & p : params) {
+    if (p.get_name() == "task_integral_ki") {
+      integral_gains = to_per_joint(p.get_name(), p, n);
+      if (!valid_integral_parameter(*integral_gains, n)) {
+        result.successful = false;
+        result.reason = "task_integral_ki 需要 " + std::to_string(n) + " 个有限非负值";
+        return result;
+      }
+    }
+  }
   for (const auto & p : params) {
     const auto & name = p.get_name();
     if (name == "use_gravity") {
@@ -463,6 +499,9 @@ rcl_interfaces::msg::SetParametersResult B601MitController::parameter_callback(
   }
   if (use_gravity.has_value()) {
     use_gravity_ = *use_gravity;
+  }
+  if (integral_gains) {
+    task_integral_gains_.writeFromNonRT(*integral_gains);
   }
   return result;
 }
@@ -594,6 +633,18 @@ controller_interface::CallbackReturn B601MitController::on_configure(
       }
     });
   ff_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>("~/ff", b601_config::mit::topic_depth);
+  task_integral_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
+    "~/task_integral", rclcpp::SensorDataQoS());
+  const auto authority_duration = std::chrono::duration_cast<SteadyClock::duration>(
+    std::chrono::duration<double>(b601_config::mit::authority_timeout_sec));
+  integral_target_sub_ = node->create_subscription<std_msgs::msg::UInt64>(
+    "~/task_integral_target", rclcpp::QoS(1).lifespan(authority_duration),
+    [this, authority_duration](std_msgs::msg::UInt64::ConstSharedPtr target) {
+      if (accepting_commands_.load()) {
+        integral_target_buffer_.writeFromNonRT(
+          IntegralTarget{target->data, SteadyClock::now() + authority_duration});
+      }
+    });
   compensation_sources_pub_ = node->create_publisher<b601_target_interfaces::msg::CompensationSources>(
     "~/compensation_sources", rclcpp::SensorDataQoS());
   debug_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>("~/debug", b601_config::mit::topic_depth);
@@ -638,6 +689,10 @@ controller_interface::CallbackReturn B601MitController::on_activate(
   q_des_.assign(n, 0.0);
   tau_cmd_.assign(n, 0.0);
   ff_components_.assign(n * 3, 0.0);
+  task_integral_.data.assign(n, 0.0);
+  last_task_integral_gains_.assign(n, 0.0);
+  integral_sequence_ = 0;
+  integral_target_buffer_.writeFromNonRT(IntegralTarget{});
   compensation_sources_.joints = joint_names_;
   compensation_sources_.gravity_enabled = use_gravity_.load();
   compensation_sources_.gravity_external.assign(n, false);
@@ -704,6 +759,7 @@ controller_interface::CallbackReturn B601MitController::on_deactivate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
   accepting_commands_ = false;
+  std::fill(task_integral_.data.begin(), task_integral_.data.end(), 0.0);
   for (auto & ci : command_interfaces_) {
     ci.set_value(0.0);      // 退出时把力矩命令（以及 kp/kd）清零
   }
@@ -979,6 +1035,15 @@ controller_interface::return_type B601MitController::update(
   const double ramp_sec = done_ ? kp_down_sec_ : kp_up_sec_;
   const double gravity_scale = gravity_scale_.load();
   const double friction_scale = friction_scale_.load();
+  const auto * integral_target = integral_target_buffer_.readFromRT();
+  const auto & integral_gains = *task_integral_gains_.readFromRT();
+  const bool integrate_target = valid_target && integral_target &&
+    integral_target->sequence != 0 && integral_target->sequence == seq_seen_ &&
+    integral_target->expires_at > gravity_now && !moving_reference && q_up_ == q_cmd_;
+  if (!integrate_target || integral_sequence_ != seq_seen_) {
+    std::fill(task_integral_.data.begin(), task_integral_.data.end(), 0.0);
+    integral_sequence_ = integrate_target ? seq_seen_ : 0;
+  }
 
   for (std::size_t i = 0; i < n; ++i) {
     const bool authoritative = !done_ || !free_enabled_[i];
@@ -1004,7 +1069,21 @@ controller_interface::return_type B601MitController::update(
     const double friction = friction_external ? *cmd->friction_ff[i] : internal_friction;
     compensation_sources_.gravity_external[i] = gravity_external;
     compensation_sources_.friction_external[i] = friction_external;
-    const double task_torque = feedforward_fresh ? cmd->tff[i] : 0.0;
+    const double ki = integral_gains[i];
+    double & integral = task_integral_.data[i];
+    const double error = q_ref_[i] - q_[i];
+    if (!authoritative || ki != last_task_integral_gains_[i] || !std::isfinite(error)) {
+      integral = 0.0;
+    }
+    last_task_integral_gains_[i] = ki;
+    if (integrate_target && authoritative && ki > 0.0 && task_integral_limit_[i] > 0.0 &&
+      std::isfinite(error))
+    {
+      // Store the capped torque so sustained error cannot accumulate beyond the integral budget.
+      const double limit = task_integral_limit_[i];
+      integral = std::clamp(integral + ki * (error * dt), -limit, limit);
+    }
+    const double task_torque = (feedforward_fresh ? cmd->tff[i] : 0.0) + integral;
     ff_components_[i] = friction;
     ff_components_[n + i] = gravity;
     ff_components_[2 * n + i] = task_torque;
@@ -1052,6 +1131,7 @@ controller_interface::return_type B601MitController::update(
     std_msgs::msg::Float64MultiArray ff;
     ff.data = ff_components_;
     ff_pub_->publish(ff);
+    task_integral_pub_->publish(task_integral_);
   }
   if (debug_counter_ % b601_config::mit::diagnostic_divider == 0 && compensation_sources_pub_) {
     compensation_sources_pub_->publish(compensation_sources_);

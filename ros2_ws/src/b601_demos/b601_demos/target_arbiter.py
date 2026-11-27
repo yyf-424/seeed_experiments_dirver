@@ -162,9 +162,13 @@ class TargetArbiter(Node):
         return int(uuid4().hex[:16], 16) or 1
 
     def publish_heartbeat(self, controller):
+        task_dispatch = 0
+        if (not self.disabling and self.session and self.session.source != "recenter"
+                and self.dispatched and self.dispatched["session"] == self.session.status_id):
+            task_dispatch = int(self.dispatched["dispatch_id"])
         self.outputs[controller].publish(AuthorizedTarget(
             kind=AuthorizedTarget.HEARTBEAT, arbiter_id=self.epochs[controller],
-            hold_revision=self.hold_revisions[controller]))
+            hold_revision=self.hold_revisions[controller], dispatch_id=task_dispatch))
 
     def request_hold(self, controller):
         self.hold_revisions[controller] += 1

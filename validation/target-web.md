@@ -1,6 +1,25 @@
 # 上层框架验收
 
-本页记录 `B601_experiments` 的隔离 MuJoCo 回归、实机日志复算和各版本的发布复测。安装和使用流程见 [README](../README.md)。
+本页记录 `B601_experiments` 的隔离 MuJoCo 回归、实机日志复算和各版本的发布复测。原始日志留在执行测试时的本机检出目录，链接指向本地 `.verify/`。安装和使用流程见 [README](../README.md)。
+
+## TCP 点动与 MIT 定时轨迹联调
+
+`codex/tcp-primitives` 以实验主工作区 `7a0c209` 为基线。独立 MoveIt 支持 MIT 轨迹执行，网页托管的 MoveIt 以规划模式服务 TCP 原语。两种入口均经过同一整机目标仲裁。
+
+- MuJoCo 通过 CLI 与网页的基座六向平移、三轴旋转、连续参考、采纳回执及外部重力切换。 [TCP 回归](../.verify/rebase-main-7a0c209/tcp.log)
+- 默认 MIT 的 MoveIt Plan & Execute、手臂与夹爪联合轨迹、路径容差、取消及撤销后持位通过。Mock 的显式 JTC 位置模式也通过 MoveIt 执行。 [MIT 回归](../.verify/rebase-main-7a0c209/mit.log) · [JTC 回归](../.verify/rebase-main-7a0c209/jtc.log)
+- 同一条网页托管 MuJoCo 链路在 J3 Ki=38 时跑通点动和积分回读，释放控制权后积分归零，随后接续标准 MIT action、归中及失能。仿真使用物理场景的 Kp、Kd。 [联调日志](../.verify/rebase-main-7a0c209/managed.log) · [实机参数](experiments/2026-11-27-tcp-ki38.yaml)
+- 10 包构建成功，静态自检 34/34、离线回归 21/21，标准仲裁和夹爪负载估计回归通过。 [离线回归](../.verify/rebase-main-7a0c209/preflight.log) · [仲裁回归](../.verify/rebase-main-7a0c209/arbiter.log) · [负载复测](../.verify/rebase-main-7a0c209/load.log)
+
+首次定时轨迹检查在控制器管理器查询服务上超时。复测等待控制器激活并核对实测反馈后完成轨迹测试。MoveIt 退出时复现主工作区已有的段错误。 [首次启动记录](../.verify/rebase-main-7a0c209/launch-mit-startup-race.log) · [复测启动与退出](../.verify/rebase-main-7a0c209/launch-mit.log)
+
+### MIT 任务积分与 J3 Ki=38 实机记录
+
+六轴积分启用后，12 向实机复测中，66 个有效关节与动作组合有 23 个在末 3 秒每个样本均达到 5%。J2 在绕 Y 正转时达到积分幅值后仍有偏差，两个小关节增量受反馈编码档距限制。 [六轴实测](../.verify/mit-integral-six-axes/report.md)
+
+固定 J3 Kp 为 132.32756，Ki 从 33.082 调到 38。相同四组动作各重复两次，J3 末 3 秒 RMSE 从 0.121° 降至 0.111°。向上 5 mm 两次的相对误差从 8.95% 和 12.82% 降至 3.14% 和 3.14%。绕 X 正转最大过冲从 0.096° 增至 0.205°。 [参数配置](experiments/2026-11-27-tcp-ki38.yaml) · [对照报告](../.verify/mit-j3-pi-refinement/report.md)
+
+另一轮 Ki=38 手动测试记录 24 次点动，含 16 次平移和 8 次旋转。TCP 回执的三维绝对误差 RMSE 为 4.38 mm，最大 7.79 mm。按基座 X/Y/Z 的最大绝对分量为 1.85/0.75/7.78 mm。相邻命令间隔约 0.04–1.89 秒，这些数据描述回执时的误差。 [逐次结果](../.verify/mit-integral-six-axes/manual-ki38-20261127-184525/comparison.json)
 
 ## MIT 定时轨迹复测
 
@@ -51,6 +70,7 @@
 | `b601_target_arbiter` | 整机只授予一个有效会话。确认会话、递增序号、有限值及关节限位后，向手臂和夹爪分别发布授权目标 |
 | `b601_target_bridge` | 调用现有 MIT 控制器的 `joint_target` 入口，按控制器消费序号匹配回执。来源失联或仲裁心跳中断时，以新鲜实测位置提交持位目标 |
 | `b601_tcp_primitives` | 规划基座坐标系 TCP 平移与旋转序列，显式执行时经同一 MIT 仲裁会话逐段发送并回读 |
+| `b601_mit_trajectory` | 接收标准 `FollowJointTrajectory`，按时序通过整机仲裁发给两组 MIT 控制器，核对末帧采纳与实测终点 |
 | `b601_mit_recenter` | 通过整机仲裁接管，按 J4 上抬、其余五轴归中、J4 回落执行，依据六轴实测及控制器回执完成归中 |
 
 客户端通过同一整机会话提交目标。`TargetFrame` 接受七关节位置、可选速度和任务前馈。`MitTargetFrame` 另可携带外部重力和摩擦补偿。控制器的采纳回执用于确认目标已经消费，位置误差和到位窗口用于确认运动完成。网页 Disable 需要最近一次归中回执及六轴仍在停放范围。执行期间仲裁会冻结新的会话申请，网页确认硬件进入 `inactive` 后退出后端。
@@ -358,6 +378,38 @@ OPENBLAS_NUM_THREADS=1 python3 scripts/test_load_feedback.py
 | MoveIt `pos_vel` | 规划并执行末端上移 20 mm，夹爪估计持续发布。该位置回路未加载 MIT 重力桥接器 |
 
 在夹爪估计点固定 0.8 kg 模拟载荷，理论载荷为 7.85 N，方向沿 `base_link` 的 −Z。SDK、命令行和原生 ROS 2 的核对样本为 7.32–7.55 N，方向距 −Z 约 2°。在空载归中复测中，250 个样本有 18 个为非零，最大 77.60 N，同姿态回放未见碰撞接触，停稳后归零。夹爪网络从关节力矩变化估计等效负载，加减速产生的惯性力矩也会计入读数。验收确认了接口可用性及已知载荷的采样结果。
+
+### 非 Web 上层与 MIT 仲裁联合复测
+
+2026-11-27 在 TCP 工作树 `833ccc1` 加本地改动上，以隔离物理 MuJoCo 场景复测。点动与轨迹使用场景原有 MIT 参数，在夹爪估计点固定 0.8 kg 载荷。独立 `b601_load` 运行 `b601_load_id.gripper_load_api:create_provider`。通过两组控制器回读核对内置重力和实际高斯 API 的选择。外部模式下 J2–J5 取高斯模型的前馈，其余轴沿用内部。SDK、ROS 2、命令行与轨迹均核对了负载估计的持续更新。
+
+| 上层入口 | 内置重力 | 外部高斯重力 | 核对项 |
+|---|---|---|---|
+| `tcp_primitives` CLI | 12/12 | 12/12 | ±X/Y/Z 平移 3 mm 和 ±X/Y/Z 旋转 3°，逐段核对两组采纳，预览未发目标 |
+| Python SDK 点发／流式 | 各 12/12 | 各 12/12 | 共用 `TcpPlanner`，核对平移姿态与旋转 XYZ 的目标约束 |
+| 原生 ROS 2 服务／话题 | 各 12/12 | 各 12/12 | 共用规划结果，使用整机仲裁下发和实际回读 |
+| 手动 MIT CLI | 通过 | 通过 | 两个关节目标先后到达，释放控制权 |
+| 标准 `FollowJointTrajectory` | 通过 | 通过 | 手臂与夹爪同轨迹、反馈和结果、竞争拒绝、取消持位、撤销持位与容差失败 |
+| MoveIt 及轨迹示例 | 通过 | 通过 | Plan & Execute、位姿执行、关节点到点、多点轨迹、夹爪与规划文件回放 |
+| MIT 归中 | 通过 | 通过 | 空载专项，负载节点持续发布，六轴到位后允许预留失能 |
+
+两种重力模式合计验证 120 段 TCP 原语。轨迹运行时，控制器管理器显示 `b601_mit_arm` 与 `b601_mit_gripper` 均活跃并占用各轴的 position、velocity、effort、Kp、Kd 接口。MoveIt 的执行端点为 `/b601_mit_trajectory/follow_joint_trajectory`。仲裁状态记录 `trajectory` 控制会话和两组控制器对末帧的共同采纳。
+
+仲裁独立回归 13 项通过。覆盖独占控制权、交接、重放拒绝、两路回执、掉线持位、重力停更回退与恢复、归中与失能门控。另验证 TCP CLI 在已有控制者时被拒绝，现有重力来源和已转发目标保持原值。CLI 在取得控制权前加载外部模型，取得控制权并确认来源生效后才发目标。
+
+在带载场景中，CLI 的旋转起止反馈最大位移为内部 0.30 mm、外部 0.49 mm。相对各段规划目标，首段下沉使 CLI 最大绝对位置误差约为内部 11.2 mm、外部 12.3 mm。此次验收覆盖上层接口、目标约束和实际回执。MoveIt 退出期间复现已知段错误，轨迹结果此前已收齐。
+
+从当前检出目录构建并加载环境后，可用以下两条命令分别复测非 Web 仲裁和 TCP 组合。每条命令会自行启动隔离 MuJoCo。
+
+```bash
+source scripts/ros_env.sh && b601_source_workspace
+B601_TEST_ROS_DOMAIN_ID=212 python3 scripts/test_target_arbitration.py
+B601_TEST_ROS_DOMAIN_ID=216 python3 scripts/test_target_arbitration.py --tcp-primitives
+```
+
+标准 action 和 MoveIt 的同框架复测见 [MIT 定时轨迹复测](#mit-定时轨迹复测)。使用外部高斯重力时，先开物理 MuJoCo MIT 后端，再按操作说明启动轨迹执行器并挂接 MoveIt。 [重力和负载启动](../README.md#在轨迹模式中选择外部-api)
+
+[逐段结果](../.verify/non-web-mit-20261127/results.json) · [内置轨迹](../.verify/non-web-mit-20261127/internal-trajectories.log) · [外部轨迹](../.verify/non-web-mit-20261127/external-trajectories.log) · [仲裁](../.verify/non-web-mit-20261127/arbiter-final.log) · [CLI 竞争复测](../.verify/non-web-mit-20261127/cli-guard.log) · [复测脚本](../.verify/non-web-mit-20261127/matrix.py)
 
 ## 外部 API 一键启动与日志复测
 

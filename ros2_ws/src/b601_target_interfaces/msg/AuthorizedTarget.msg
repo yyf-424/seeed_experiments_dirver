@@ -6,6 +6,7 @@ uint8 kind
 uint64 arbiter_id
 # Increments on this controller group when a source expires.
 uint64 hold_revision
-# Identifier used to correlate dispatch with the controller's applied status.
+# TARGET: identifier for the controller's applied status.
+# HEARTBEAT: most recent target still authorized for task integration, or zero.
 uint64 dispatch_id
 b601_target_interfaces/MitTarget command

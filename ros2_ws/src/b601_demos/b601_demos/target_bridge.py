@@ -32,6 +32,9 @@ class ControllerRoute:
         gravity_qos = QoSProfile(depth=1, lifespan=Duration(nanoseconds=node.feedback_timeout_ns))
         self.gravity = node.create_publisher(GravityCompensation, f"/{name}/gravity_compensation", gravity_qos)
         self.applied = node.create_publisher(UInt64, f"/{name}/target_applied", depth)
+        integral_qos = QoSProfile(depth=1, lifespan=Duration(nanoseconds=node.authority_timeout_ns))
+        self.integral_target = node.create_publisher(
+            UInt64, f"/{name}/task_integral_target", integral_qos)
         self.holding = node.create_publisher(Bool, f"/{name}/target_holding", depth)
         self.epoch_request = node.create_publisher(UInt64, f"/{name}/target_epoch_requested", depth)
         node.create_subscription(AuthorizedTarget, f"/{name}/authorized_target", self.on_frame, depth)
@@ -45,6 +48,7 @@ class ControllerRoute:
         self.hold_requested = False
         self.hold_confirmed = False
         self.dispatch_id = 0
+        self.integral_dispatch_id = 0
         self.state_ns = None
         self.sequence = 0
         self.sent_sequence = 0
@@ -54,6 +58,7 @@ class ControllerRoute:
         self.queued = None
         self.hold_requested = True
         self.dispatch_id = 0
+        self.integral_dispatch_id = 0
         self.pending.clear()
 
     def check_heartbeat(self, now):
@@ -83,6 +88,7 @@ class ControllerRoute:
             self.enter_hold()
         if heartbeat:
             self.heartbeat_ns = now
+            self.integral_dispatch_id = frame.dispatch_id
         elif not self.blocked and frame.dispatch_id:
             self.queued = frame
         self.flush(now)
@@ -149,6 +155,12 @@ class ControllerRoute:
         self.flush(now)
         if self.blocked:
             self.epoch_request.publish(UInt64(data=self.epoch))
+        integral_sequence = 0
+        if (not self.blocked and self.state_is_fresh(now) and self.dispatch_id
+                and self.integral_dispatch_id == self.dispatch_id
+                and self.sequence == self.sent_sequence):
+            integral_sequence = self.sequence
+        self.integral_target.publish(UInt64(data=integral_sequence))
         self.publish_status()
 
 

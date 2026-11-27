@@ -15,6 +15,7 @@
 #include <realtime_tools/realtime_buffer.h>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/u_int64.hpp>
 
 #include "b601_mit_controller/b601_chain.hpp"
 #include "b601_target_interfaces/msg/compensation_sources.hpp"
@@ -76,6 +77,8 @@ private:
   std::atomic<double> friction_scale_{b601_config::mit::friction_scale};
   double task_torque_timeout_sec_{b601_config::mit::task_torque_timeout_sec};
   double target_velocity_timeout_sec_{b601_config::mit::target_velocity_timeout_sec};
+  std::vector<double> task_integral_limit_;
+  rt::RealtimeBuffer<std::vector<double>> task_integral_gains_;
   // ---- 指令层（Phase 1）----
   std::vector<double> kp_free_;        // 等待（无权威）档刚度
   std::vector<double> kd_free_;
@@ -130,6 +133,16 @@ private:
   std::vector<double> q_des_;
   std::vector<double> tau_cmd_;
   std::vector<double> ff_components_;  // 摩擦、重力和任务三段
+  std_msgs::msg::Float64MultiArray task_integral_;  // 积分力矩，沿用关节 effort 单位
+  std::vector<double> last_task_integral_gains_;
+  uint64_t integral_sequence_{0};
+  using SteadyClock = std::chrono::steady_clock;
+  struct IntegralTarget
+  {
+    uint64_t sequence{0};
+    SteadyClock::time_point expires_at;
+  };
+  rt::RealtimeBuffer<IntegralTarget> integral_target_buffer_;
   std::atomic<int64_t> activation_time_ns_{0};
   std::atomic<bool> accepting_commands_{false};
   std::array<double, chain::kNumJoints> tau_g_{};
@@ -154,7 +167,6 @@ private:
   using GravityCompensation = b601_target_interfaces::msg::GravityCompensation;
   using EffortOverrides = std::vector<std::optional<double>>;
   bool read_overrides(const GravityCompensation::_efforts_type & entries, EffortOverrides & values) const;
-  using SteadyClock = std::chrono::steady_clock;
   struct GravitySample
   {
     double effort{0.0};
@@ -164,6 +176,8 @@ private:
   rt::RealtimeBuffer<std::vector<GravitySample>> gravity_buffer_;
   rclcpp::Subscription<GravityCompensation>::SharedPtr gravity_sub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr ff_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr task_integral_pub_;
+  rclcpp::Subscription<std_msgs::msg::UInt64>::SharedPtr integral_target_sub_;
   rclcpp::Publisher<b601_target_interfaces::msg::CompensationSources>::SharedPtr compensation_sources_pub_;
   b601_target_interfaces::msg::CompensationSources compensation_sources_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr state_pub_;

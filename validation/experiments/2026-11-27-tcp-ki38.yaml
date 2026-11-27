@@ -1,0 +1,11 @@
+# 2026-11-27 实机手动 TCP 点动参数。按 J1–J6 排列。
+# 将这一段合入高刚度 MIT 重力补偿控制器配置。重力 API 由上层选择。
+b601_mit_arm:
+  ros__parameters:
+    kp_move: [115.0, 126.02625, 132.32756, 31.5, 18.0, 28.0]
+    kd_move: [5.0, 5.0, 5.0, 2.8, 1.6, 0.65]
+    friction: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    friction_scale: 0.0
+    free_enabled: false
+    task_integral_ki: [28.75, 50.411, 38.0, 5.04, 7.2, 11.2]
+    task_integral_limit: [0.8, 1.5, 2.0, 0.6, 0.5, 0.3]

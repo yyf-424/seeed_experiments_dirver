@@ -78,8 +78,8 @@ class GravityProvider:
             raise ValueError(f"cannot load gravity_api {api}: {error}") from error
         return evaluate
 
-    def select_source(self, source, api=None):
-        """Request a manual selection, applying external mode with its first valid sample."""
+    def select_source(self, source, api=None, *, apply=True):
+        """Prepare a gravity source and optionally request selection on the bridge."""
         if source not in ("internal", "external"):
             raise ValueError("gravity_source must be internal or external")
         with self.lock:
@@ -89,7 +89,7 @@ class GravityProvider:
                 evaluate = self.evaluate if api == self.api else None
                 evaluate = evaluate or self.load_factory(api)
             self.source, self.api, self.evaluate = source, api, evaluate
-            self.pending = True
+            self.pending = apply
             self.failure = None
 
     def on_status(self, message):

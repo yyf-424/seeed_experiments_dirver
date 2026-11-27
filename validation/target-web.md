@@ -2,6 +2,8 @@
 
 ## MIT 定时轨迹复测
 
+本节对应 `B601_experiments/main` 的功能提交 `ca73e33`。可从 [启动与停机说明](../README.md#mit-定时轨迹) 进入复测。实机原始 CSV、轨迹 JSON 和曲线保存在本机工作区的 `.verify/`。
+
 在隔离 ROS 域以 `ros2 launch b601_moveit_config demo.launch.py use_rviz:=false` 启动默认 MuJoCo 物理场景，在同一环境运行 `python3 scripts/test_mit_trajectory.py`。检查仅加载 MIT 控制器和反馈广播器，手臂控制器报告重力补偿已开启。
 
 - 通过手臂与夹爪同目标的两点定时轨迹、实测反馈和末帧采纳。

@@ -282,6 +282,8 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 
 ### MIT 定时轨迹
 
+此接口在 `ca73e33` 接入。MuJoCo 已验证 MoveIt 规划与执行、取消和撤销后持位。实机双轴 action 成功，六轴复测因 J2 终点误差超容差返回失败，J3 沿途欠跟踪最明显。 [仿真与实机验收](validation/target-web.md#mit-定时轨迹复测)
+
 加载本工作区后运行 `ros2 launch b601_moveit_config demo.launch.py`。默认调用现有 MuJoCo 物理场景启动入口，使用场景配套的 MIT 重力补偿。MoveIt 的 Plan & Execute、点到点示例、多点轨迹和夹爪示例共用 `/b601_mit_trajectory/follow_joint_trajectory`。原生 ROS 2 和 SDK 客户端也可通过同一标准 action 提交 `JointTrajectory`。已有 `TargetClient` 点发和流式接口仍可直接使用。
 
 后端已经用现有实机 MIT 脚本启动并完成归中时，在同一 ROS 域加载 `ros2 launch b601_moveit_config move_group.launch.py hardware:=dm`。这个入口挂接 MoveIt 和轨迹执行器。只需要 action 时，在已运行的 MIT 后端上启动 `ros2 run b601_demos mit_trajectory`。复用已有执行器时，给 MoveIt 入口传入 `start_mit_trajectory:=false`。
@@ -289,6 +291,23 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 执行器按轨迹时间插值，以现有手动 MIT 工具的发布频率发送参考。单条轨迹可同时包含手臂和夹爪。终点要求两组控制器采纳，并核对实测关节误差。请求未指定终点位置容差时，使用配置中对应 MIT 档的到位误差下限。取消使用现有实测持位机制。重力补偿和刚度由下层控制器的启动配置决定。
 
 用 `trajectory_mode:=pos_vel` 显式使用 JTC。`hardware:=mock` 默认映射到位置模式。运行 ROS 示例时，可用 `-p controller:=b601_arm_controller` 或 `-p controller:=b601_gripper_controller` 选择位置 action。
+
+#### 在轨迹模式中选择外部 API
+
+先用原有入口启动开启重力补偿的 MIT 后端。在同一 ROS 域、完成工作区环境加载后，单独启动轨迹执行器并指定高斯模型。以下命令从实验主工作区根目录运行。
+
+```bash
+PYTHONPATH="$PWD/../gravity_identification${PYTHONPATH:+:$PYTHONPATH}" \
+  ros2 run b601_demos mit_trajectory --ros-args \
+  -p gravity_source:=external \
+  -p gravity_api:=neural_network.feedforward:GaussianFeedforward.load
+```
+
+MoveIt 挂接时传 `start_mit_trajectory:=false` 复用该执行器，`hardware` 取现有后端。需要夹爪读数时，在同一域 [单独启动负载节点](#不开网页时读取夹爪估计)，并订阅 `/b601_load/estimates`。
+
+#### 结束轨迹会话
+
+先等当前轨迹结束，或取消并核对持位。对实机在同一 ROS 域运行 `./scripts/dm_park.sh --mit`，确认实测归中、硬件进入 `inactive`、控制器管理器退出及失能后回读，再退出其余 launch。网页托管实机时在页面依次执行归中和 Disable。 [实机归中与失能](#电机侧-mit-归中)
 
 ### 在网页选择运行后端
 

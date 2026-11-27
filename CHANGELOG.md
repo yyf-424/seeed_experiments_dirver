@@ -2,7 +2,8 @@
 
 ## 未发布
 
-- MoveIt 上层入口默认通过标准 `FollowJointTrajectory` 执行 MIT 定时轨迹，兼容手臂与夹爪同帧执行、实测反馈和取消持位。显式位置模式使用 JTC。 [启动与接口](README.md#mit-定时轨迹)
+- `ca73e33` 将 MoveIt 上层入口默认接到 MIT 的标准 `FollowJointTrajectory` action，支持手臂与夹爪同轨迹、实测反馈和取消持位。显式位置模式使用 JTC。 [启动与接口](README.md#mit-定时轨迹)
+- 实机双轴往返 action 成功。六轴往返确认各轴收到完整参考，J2 终点误差 12.97 mrad 超过 10 mrad 容差，J3 沿途峰值误差 24.98 mrad。两次均按实测归中并失能。 [实机六轴验收](validation/target-web.md#b601-dm-实机六轴往返)
 - 新增外部 API 一键启动脚本，默认启用高斯重力补偿和夹爪负载辨识。每个 Web 会话记录操作、反馈、负载估计和补偿来源，网页托管实机时同时保存驱动反馈 CSV。 [启动与日志说明](README.md#外部-api-一键启动) · [MuJoCo 复测](validation/target-web.md#外部-api-一键启动与日志复测)
 
 ## v1.1.2 发布后补充复测 · 2026-11-27

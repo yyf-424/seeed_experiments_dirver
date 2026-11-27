@@ -4,11 +4,13 @@
     MoveItConfigsBuilder 把散落在多个 yaml 里的参数收成一个对象，
     .to_dict() 给 move_group 用，.robot_description* 那几项给 rviz 用。
 
-注意 URDF 我们**不放在** b601_moveit_config 里，而是从 b601_description 取，
-保证“RViz 看的模型”和“controller 驱动的模型”永远是同一个文件。
+运动学、惯量和限位沿用 b601_description。MoveIt 和 RViz 的规划模型使用随包安装的
+Seeed B601-DM 碰撞网格。
 """
 
 import os
+from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from ament_index_python.packages import get_package_share_directory
 from launch.substitutions import LaunchConfiguration
@@ -16,11 +18,39 @@ from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
 
 
-def build_moveit_configs(hardware: str = "mock", mode: str = "pos_vel"):
+def use_vendor_collisions(description, vendor_model):
+    robot = ET.fromstring(description)
+    vendor = ET.parse(vendor_model / "urdf" / "ReBot_Arm_DM.urdf")
+    vendor_links = {link.attrib["name"]: link for link in vendor.findall("link")}
+    prefix = "package://rebotarm_bringup/description/DM/"
+    for link in robot.findall("link"):
+        existing = link.findall("collision")
+        if not existing:
+            continue
+        name = link.attrib["name"]
+        collisions = vendor_links[name].findall("collision")
+        if not collisions:
+            raise ValueError(f"Seeed B601-DM is missing collision geometry for {name}")
+        for collision in existing:
+            link.remove(collision)
+        for collision in collisions:
+            mesh = collision.find("./geometry/mesh")
+            uri = mesh.attrib["filename"]
+            if not uri.startswith(prefix):
+                raise ValueError(f"Unexpected Seeed B601-DM collision mesh URI: {uri}")
+            path = vendor_model / uri.removeprefix(prefix)
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            mesh.set("filename", path.as_uri())
+            link.append(collision)
+    return ET.tostring(robot, encoding="unicode")
+
+
+def build_moveit_configs(hardware: str = "mock", mode: str = "pos_vel", *, collision_description=None):
     """按指定硬件后端装配 MoveIt 参数集。"""
     description_share = get_package_share_directory("b601_description")
 
-    return (
+    config = (
         MoveItConfigsBuilder("b601_dm", package_name="b601_moveit_config")
         .robot_description(
             file_path=os.path.join(description_share, "urdf", "b601_dm.urdf.xacro"),
@@ -44,6 +74,11 @@ def build_moveit_configs(hardware: str = "mock", mode: str = "pos_vel"):
         .planning_pipelines(pipelines=["ompl"], default_planning_pipeline="ompl")
         .to_moveit_configs()
     )
+    vendor_model = Path(collision_description or Path(description_share) / "assets" / "b601_dm").resolve()
+    config.robot_description["robot_description"] = use_vendor_collisions(
+        config.robot_description["robot_description"], vendor_model
+    )
+    return config
 
 
 def trajectory_mode(context):

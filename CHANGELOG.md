@@ -1,7 +1,8 @@
 # 发布记录
 
-## 未发布
+## v1.1.3 · 官方碰撞几何与 MIT 轨迹 · 2026-11-27
 
+- MoveIt 默认使用随包安装的 Seeed B601-DM 碰撞网格。实机标定停放位可规划小幅 TCP 轨迹。两条 TCP 和两条关节轨迹均进入 MIT 并收到反馈，3 条成功返回，内置重力的 TCP 往返在返回点超时。 [发布复测](validation/target-web.md#v113-发布复测)
 - `ca73e33` 将 MoveIt 上层入口默认接到 MIT 的标准 `FollowJointTrajectory` action，支持手臂与夹爪同轨迹、实测反馈和取消持位。显式位置模式使用 JTC。 [启动与接口](README.md#mit-定时轨迹)
 - 实机双轴往返 action 成功。六轴往返确认各轴收到完整参考，J2 终点误差 12.97 mrad 超过 10 mrad 容差，J3 沿途峰值误差 24.98 mrad。两次均按实测归中并失能。 [实机六轴验收](validation/target-web.md#b601-dm-实机六轴往返)
 - TCP 点动支持 `base_link` 六向平移与绕 TCP 的 X/Y/Z 轴正反转。网页、CLI 和 HTTP 可组合两类原语，Python SDK 与原生 ROS 2 可共用规划结果。网页显示姿态误差，HTTP 与 JSONL 保存旋转参数和目标／实测姿态。 [用法](README.md#tcp-原语组合) · [上层验收](validation/target-web.md#tcp-原语上层入口复测) · [实机误差](validation/target-web.md#tcp-平移与旋转实机复测)

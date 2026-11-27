@@ -2,6 +2,27 @@
 
 本页记录 `B601_experiments` 的隔离 MuJoCo 回归、实机日志复算和各版本的发布复测。原始日志留在执行测试时的本机检出目录，链接指向本地 `.verify/`。安装和使用流程见 [README](../README.md)。
 
+## v1.1.3 发布复测
+
+发布构建核对了 10 个 ROS 包与 3 个 Python 包均为 `1.1.3`，静态自检 34/34。定版前同一组功能代码通过离线回归 21/21、MuJoCo MIT 轨迹 6/6 和负载反馈专项。MIT 轨迹复测在 MuJoCo 控制器激活后单独挂接 MoveIt，覆盖 Plan & Execute、反馈、取消、撤销和异常容差。 [版本核对](../.verify/v1.1.3/package-versions.log) · [离线回归](../.verify/v1.1.3/preflight-candidate.log) · [MIT 轨迹](../.verify/v1.1.3/mit-trajectory.log)
+
+MoveIt 在 Mock、实机和 MuJoCo 的默认规划模型中解析到 10 个 Seeed B601-DM 碰撞网格。实机标定停放位的回读起点及 `base_link` +Z 5 mm 路径通过碰撞检查。 [模型来源](../ros2_ws/src/b601_description/assets/b601_dm/README.md)
+
+外部 API 一键入口先显示预览，连接实机后默认使用 MIT 高刚度、外部高斯重力和夹爪负载辨识。普通 Web 入口默认使用内置重力，负载估计由 `load_api` 启用。 [启动方式](../README.md#外部-api-一键启动)
+
+`1.1.3` 的一键入口在物理 MuJoCo 中通过外部高斯重力、夹爪反馈、六段混合 TCP 原语、双 MIT 回执、重力切换、归中和失能。早期复测分别出现控制器服务超时和切换期间会话心跳返回 HTTP 409。成功复测在释放点动会话后切换重力来源。 [一键入口复测](../.verify/v1.1.3/external-web.log)
+
+### 官方碰撞网格实机轨迹
+
+发布前实机使用 `mit_impedance`、重力补偿和显式启用的软硬刚度切换。四条轨迹均经 `/execute_trajectory` 发送到 `/b601_mit_trajectory/follow_joint_trajectory`，并返回实测反馈。夹爪独立负载节点持续回报空载。
+
+| 实机轨迹 | 内置重力 | 外部高斯重力 |
+|---|---|---|
+| J1/J4 小幅往返 | action 成功，180 帧 | action 成功，181 帧 |
+| TCP +Z 5 mm、停留、返回 | 返回点超时，287 帧 | action 成功，179 帧 |
+
+内置重力组返回点的 J2 绝对误差为 10.30 mrad，超过 10 mrad 的到位容差，MoveIt 在 6.05 秒后取消。两组均未达到上移目标。根据停留窗口的实测关节角反算，TCP 三维位置误差为内置 6.79 mm、外部 5.27 mm。收尾实测归中，硬件确认 `inactive`，串口释放。关闭 MoveIt 时仍复现既有退出段错误。 [实机报告](../.verify/official-meshes-mit-trajectory/report.md) · [归中日志](../.verify/official-meshes-mit-trajectory/park.log)
+
 ## TCP 点动与 MIT 定时轨迹联调
 
 `codex/tcp-primitives` 以实验主工作区 `7a0c209` 为基线。独立 MoveIt 支持 MIT 轨迹执行，网页托管的 MoveIt 以规划模式服务 TCP 原语。两种入口均经过同一整机目标仲裁。

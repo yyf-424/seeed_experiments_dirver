@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>b601_moveit_config</name>
-  <version>1.1.2</version>
+  <version>1.1.3</version>
   <description>
     B601 的 MoveIt 2 配置：规划组（arm / gripper）、KDL 逆解、关节限制、OMPL 规划器、
     以及“MoveIt ↔ ros2_control 的 joint_trajectory_controller”对接表。

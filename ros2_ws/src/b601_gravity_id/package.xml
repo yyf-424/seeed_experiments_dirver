@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>b601_gravity_id</name>
-  <version>1.1.2</version>
+  <version>1.1.3</version>
   <description>
     B601-DM 的重力/摩擦辨识与 MIT 力控：
     静态采样 → 最小二乘辨识每连杆 (m, m·c) → 生成 τ_ff 前馈参数 → MIT 控制器使用。

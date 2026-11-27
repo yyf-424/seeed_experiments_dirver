@@ -293,7 +293,7 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 
 后端已经用现有实机 MIT 脚本启动并完成归中时，在同一 ROS 域加载 `ros2 launch b601_moveit_config move_group.launch.py hardware:=dm`。这个入口挂接 MoveIt 和轨迹执行器。只需要 action 时，在已运行的 MIT 后端上启动 `ros2 run b601_demos mit_trajectory`。复用已有执行器时，给 MoveIt 入口传入 `start_mit_trajectory:=false`。
 
-执行器按轨迹时间插值，以现有手动 MIT 工具的发布频率发送参考。单条轨迹可同时包含手臂和夹爪。终点要求两组控制器采纳，并核对实测关节误差。请求未指定终点位置容差时，使用配置中对应 MIT 档的到位误差下限。取消使用现有实测持位机制。重力补偿和刚度由下层控制器的启动配置决定。
+执行器按轨迹时间插值，以现有手动 MIT 工具的发布频率发送参考。单条轨迹可同时包含手臂和夹爪。终点要求两组控制器采纳，并核对实测关节误差。请求未指定终点位置容差时，使用对应 MIT 档的到位误差带上限 `settle_band_max`，当前手臂为 `0.05 rad`，夹爪为 `0.0025 m`。请求显式指定容差时使用请求值。取消使用现有实测持位机制。重力补偿和刚度由下层控制器的启动配置决定。
 
 用 `trajectory_mode:=pos_vel` 显式使用 JTC。`hardware:=mock` 默认映射到位置模式。运行 ROS 示例时，可用 `-p controller:=b601_arm_controller` 或 `-p controller:=b601_gripper_controller` 选择位置 action。
 

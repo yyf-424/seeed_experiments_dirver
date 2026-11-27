@@ -106,7 +106,7 @@ class MitTrajectory(Node):
             profile = mit["profiles"][instance.get("gravity_profile", instance["profile"])]
             for name in instance["joints"]:
                 self.goal_defaults[name, "position"] = profile["per_joint"][name].get(
-                    "settle_band_min", profile["group"]["settle_band_min"])
+                    "settle_band_max", profile["group"]["settle_band_max"])
         self.busy = Lock()
         self.latest_feedback = None
         self.status = {}

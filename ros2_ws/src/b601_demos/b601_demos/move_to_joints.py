@@ -32,6 +32,7 @@ from sensor_msgs.msg import JointState
 
 from b601_demos.trajectory_utils import (
     ARM_JOINTS,
+    MIT_TRAJECTORY_CONTROLLER,
     check_limits,
     describe,
     make_trajectory,
@@ -51,7 +52,7 @@ class MoveToJoints(Node):
     def __init__(self):
         super().__init__("b601_move_to_joints")
 
-        self.declare_parameter("controller", "b601_arm_controller")
+        self.declare_parameter("controller", MIT_TRAJECTORY_CONTROLLER)
         self.declare_parameter("target", SETTINGS["target"])
         self.declare_parameter("duration", SETTINGS["duration"])
 

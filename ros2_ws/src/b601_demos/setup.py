@@ -40,6 +40,7 @@ setup(
             "target_bridge = b601_demos.target_bridge:main",
             "mit_recenter = b601_demos.mit_recenter:main",
             "mit_recenter_call = b601_demos.mit_recenter_client:main",
+            "mit_trajectory = b601_demos.mit_trajectory:main",
         ],
     },
 )

@@ -1,0 +1,26 @@
+# ============================================================================
+# ⚠ 本文件由 scripts/sync_config.py 自动生成，请勿手工编辑。
+#    要改参数请改：ros2_ws/src/b601_description/config/b601_project.yaml
+#    改完执行：  ./scripts/sync_config.py
+# ============================================================================
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+moveit_manage_controllers: false
+moveit_simple_controller_manager:
+  controller_names:
+  - b601_mit_trajectory
+  b601_mit_trajectory:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - finger_left
+trajectory_execution:
+  allowed_execution_duration_scaling: 1.5
+  allowed_goal_duration_margin: 0.5
+  allowed_start_tolerance: 0.05

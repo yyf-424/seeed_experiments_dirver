@@ -25,7 +25,8 @@ v1.1.2 支持持续外部重力补偿、停更回退和手动切换。网页外�
 | 外部高斯重力、夹爪估计和会话日志 | `./scripts/start_target_web_external.sh`。 [外部 API 一键启动](#外部-api-一键启动) |
 | 演练网页发令与归中 | 在网页手动连接 MuJoCo，发送目标后归中、Disable |
 | 对比内置重力与高斯模型 | 按各自的启动参数打开 Web，再连接 MuJoCo 物理场景。 [启动命令](#在上层启动时选择重力来源) |
-| 跑标准位置与 MoveIt 轨迹 | 加载当前工作区后运行 `ros2 launch b601_moveit_config demo.launch.py hardware:=mock` |
+| 跑 MoveIt 与 MIT 定时轨迹 | 加载当前工作区后运行 `ros2 launch b601_moveit_config demo.launch.py`。默认使用 MuJoCo 物理场景。 [启动与接口](#mit-定时轨迹) |
+| 跑 mock 位置回路 | `ros2 launch b601_moveit_config demo.launch.py hardware:=mock` |
 | 控制真机 | 现场确认后，在网页连接「实机」或在终端运行 [MIT 重力补偿脚本](#快速启动重力补偿)，按所选入口归中并失能 |
 | 接入程序或策略 | 用 [TargetClient 或原生 ROS 2](#ros-2-接口) 申请整机控制权并发送六轴与夹爪目标 |
 
@@ -277,7 +278,17 @@ MIT bringup 启动 `b601_target_arbiter` 和 `b601_target_bridge`，
 仲裁向各组发布 `/<控制器>/authorized_target`，转发节点是 `/<控制器>/joint_target`
 的唯一正常发布者。转发节点从
 `/<控制器>/state` 读取主线控制器的目标序号，在 `/<控制器>/target_applied` 回报采纳编号。
-标准位置模式仍使用自己的 `FollowJointTrajectory` 接口。
+位置模式使用 JTC 的 `FollowJointTrajectory` 接口。
+
+### MIT 定时轨迹
+
+加载本工作区后运行 `ros2 launch b601_moveit_config demo.launch.py`。默认调用现有 MuJoCo 物理场景启动入口，使用场景配套的 MIT 重力补偿。MoveIt 的 Plan & Execute、点到点示例、多点轨迹和夹爪示例共用 `/b601_mit_trajectory/follow_joint_trajectory`。原生 ROS 2 和 SDK 客户端也可通过同一标准 action 提交 `JointTrajectory`。已有 `TargetClient` 点发和流式接口仍可直接使用。
+
+后端已经用现有实机 MIT 脚本启动并完成归中时，在同一 ROS 域加载 `ros2 launch b601_moveit_config move_group.launch.py hardware:=dm`。这个入口挂接 MoveIt 和轨迹执行器。只需要 action 时，在已运行的 MIT 后端上启动 `ros2 run b601_demos mit_trajectory`。复用已有执行器时，给 MoveIt 入口传入 `start_mit_trajectory:=false`。
+
+执行器按轨迹时间插值，以现有手动 MIT 工具的发布频率发送参考。单条轨迹可同时包含手臂和夹爪。终点要求两组控制器采纳，并核对实测关节误差。请求未指定终点位置容差时，使用配置中对应 MIT 档的到位误差下限。取消使用现有实测持位机制。重力补偿和刚度由下层控制器的启动配置决定。
+
+用 `trajectory_mode:=pos_vel` 显式使用 JTC。`hardware:=mock` 默认映射到位置模式。运行 ROS 示例时，可用 `-p controller:=b601_arm_controller` 或 `-p controller:=b601_gripper_controller` 选择位置 action。
 
 ### 在网页选择运行后端
 

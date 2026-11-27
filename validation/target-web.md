@@ -1,5 +1,42 @@
 # 上层框架验收
 
+## MIT 定时轨迹复测
+
+在隔离 ROS 域以 `ros2 launch b601_moveit_config demo.launch.py use_rviz:=false` 启动默认 MuJoCo 物理场景，在同一环境运行 `python3 scripts/test_mit_trajectory.py`。检查仅加载 MIT 控制器和反馈广播器，手臂控制器报告重力补偿已开启。
+
+- 通过手臂与夹爪同目标的两点定时轨迹、实测反馈和末帧采纳。
+- 通过竞争来源拒绝、执行中取消、操作者撤销控制权和双组持位确认。带显式路径容差的偏差目标返回 `PATH_TOLERANCE_VIOLATED`。
+- MoveIt Plan & Execute 通过 12 点 MIT 轨迹。显式 mock 位置模式通过 12 点 JTC 轨迹。
+- 原有 MuJoCo MIT 后端就绪后，单独启动 `move_group.launch.py hardware:=mujoco use_rviz:=false`，重复上述 MIT 轨迹检查并通过。首次并行启动时下层控制器管理器出现 DDS 服务响应失败，按顺序启动后通过。
+
+仿真退出时 `move_group` 复现既有段错误，MIT 轨迹执行器正常退出。
+
+### B601-DM 实机双轴往返
+
+2026-11-27 在主工作区使用 `hardware:=dm dm_command_mode:=mit_impedance mit_gravity_compensation:=true mit_stiffness_switching:=true`。现场确认后，从 `FollowJointTrajectory` 发送 4 秒四点轨迹，J1 和 J3 相对实测起点的最大参考位移为 +0.040 和 −0.035 rad。手臂回读内置重力开启，两路末帧采纳一致，action 返回 `SUCCESSFUL`，共收到 194 帧反馈。
+
+| 关节 | 实测最大位移幅值 | 跟踪 RMSE | 沿途峰值误差 | 终点绝对误差 |
+|---|---:|---:|---:|---:|
+| J1 | 0.03586 rad | 0.00467 rad | 0.00717 rad | 0.00458 rad |
+| J3 | 0.01411 rad | 0.01504 rad | 0.02538 rad | 0.01106 rad |
+
+驱动 CSV 在两轴都记录到完整参考幅值。J3 实测最大位移约为参考的 40%。本次未给 action 指定沿途误差容差。试验期间仅有偏离教学启动位形告警，收尾通过六轴实测归中，硬件确认进入 `inactive`，串口已释放。 [原始 action 反馈](../.verify/mit-trajectory-real/real-action-feedback.csv) · [驱动参考与反馈](../.verify/mit-trajectory-real/driver-feedback.csv) · [归中停机](../.verify/mit-trajectory-real/main-park.log)
+
+### B601-DM 实机六轴往返
+
+2026-11-27 沿用主工作区内置重力补偿与变刚度。以启动归中后的实测关节位置为起点，六轴在 0、1.5、3.0、5.0 秒分别走零位移、半幅、全幅和零位移。J1–J6 全幅依次为 `[+40, −30, −35, −30, +30, +35]` mrad，夹爪保持起始开度。各轨迹点速度和加速度设为零，段间使用五次插值。
+
+| 关节 | 实测峰值位移（mrad） | 沿途 RMSE（mrad） | 沿途峰值误差（mrad） | 终点绝对误差（mrad） |
+|---|---:|---:|---:|---:|
+| J1 | +35.10 | 4.57 | 7.12 | 4.20 |
+| J2 | −26.70 | 6.13 | 12.97 | 12.97 |
+| J3 | −13.35 | 14.85 | 24.98 | 11.06 |
+| J4 | −20.98 | 7.13 | 13.86 | 7.63 |
+| J5 | +19.84 | 7.31 | 12.51 | 4.20 |
+| J6 | +27.08 | 4.94 | 8.53 | 0.38 |
+
+收到 333 帧 action 反馈，驱动记录显示六轴参考均达到设定幅值，夹爪驱动参考保持恒定，实测漂移最大 0.0038 mm。末段等待 2 秒后，J2 终点误差仍超过配置容差 10 mrad，action 返回 `GOAL_TOLERANCE_VIOLATED`。J3 实测幅值约为目标的 38%。全程未触发急停。随后六轴按归中服务到位，硬件确认 `inactive`，串口已释放。 [实际轨迹](../.verify/mit-trajectory-real-six/real-goal.json) · [跟踪曲线](../.verify/mit-trajectory-real-six/trajectory-tracking.png) · [驱动参考与反馈](../.verify/mit-trajectory-real-six/driver-feedback.csv) · [归中停机](../.verify/mit-trajectory-real-six/main-park.log)
+
 本页记录 `B601_experiments` 当前扩展验收与各版本的发布复测。扩展试验在隔离 MuJoCo 中运行。安装和使用流程见 [README](../README.md)。
 
 ## 节点和数据流

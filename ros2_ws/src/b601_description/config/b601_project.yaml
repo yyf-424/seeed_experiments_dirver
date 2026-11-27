@@ -421,6 +421,7 @@ controllers:
 # default_*_scaling 是教学默认：只用 20% 极限速度，便于观察
 # ---------------------------------------------------------------------------
 moveit:
+  mit_trajectory_controller: b601_mit_trajectory
   default_velocity_scaling_factor: 1.0
   default_acceleration_scaling_factor: 1.0
   trajectory_execution:

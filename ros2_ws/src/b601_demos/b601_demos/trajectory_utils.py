@@ -20,6 +20,7 @@ from b601_description.project_config import load_project_config
 _PROJECT = load_project_config()
 ARM_JOINTS = tuple(_PROJECT["robot"]["arm_joints"])
 GRIPPER_JOINT = _PROJECT["robot"]["gripper_joint"]
+MIT_TRAJECTORY_CONTROLLER = _PROJECT["moveit"]["mit_trajectory_controller"]
 RECENTER_POSITIONS = tuple(_PROJECT["recenter"]["joints"][name] for name in ARM_JOINTS)
 RECENTER_COMPLETED = "/b601_mit_recenter/completed_dispatch"
 RECENTER_TOLERANCE = _PROJECT["recenter"]["position_tolerance_rad"]
@@ -79,8 +80,8 @@ def check_limits(joint_names, positions):
 
 def duration(seconds):
     """float 秒 → builtin_interfaces/Duration。"""
-    sec = int(seconds)
-    return Duration(sec=sec, nanosec=int(round((seconds - sec) * 1e9)))
+    sec, nanosec = divmod(round(seconds * 1e9), 1_000_000_000)
+    return Duration(sec=sec, nanosec=nanosec)
 
 
 def make_point(joint_names, positions, time_from_start):

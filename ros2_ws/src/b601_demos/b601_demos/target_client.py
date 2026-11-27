@@ -55,6 +55,8 @@ class TargetClient:
             SelectSource, f"{ARBITER}/select_source", callback_group=callback_group)
         self.releaser = node.create_client(
             ReleaseSource, f"{ARBITER}/release_source", callback_group=callback_group)
+        self.canceler = node.create_client(
+            ReleaseSource, f"{ARBITER}/cancel_source", callback_group=callback_group)
         self.renewer = node.create_client(
             RenewSource, f"{ARBITER}/renew_source", callback_group=callback_group)
         self.sender = node.create_client(
@@ -95,6 +97,7 @@ class TargetClient:
             self.session_id = reply.session_id
             self.sequence = 0
             self.positions = {}
+        return reply.session
 
     def renew(self, timeout, *, spinning=False):
         with self.lock:
@@ -103,13 +106,14 @@ class TargetClient:
         if not reply.accepted:
             raise RuntimeError(reply.message)
 
-    def release(self, timeout, *, spinning=False):
+    def release(self, timeout, *, spinning=False, hold=False):
         with self.lock:
             session_id = self.session_id
         if not session_id:
             return
         request = ReleaseSource.Request(session_id=session_id)
-        reply = self.call(self.releaser, request, timeout, spinning=spinning)
+        endpoint = self.canceler if hold else self.releaser
+        reply = self.call(endpoint, request, timeout, spinning=spinning)
         with self.lock:
             self.session_id = ""
         if not reply.accepted:

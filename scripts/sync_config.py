@@ -489,8 +489,13 @@ def render_mit_controllers(cfg: dict, gravity_compensation: bool = False, *,
     return head + dump_yaml(data)
 
 
-def render_moveit_controllers(cfg: dict) -> str:
+def render_moveit_controllers(cfg: dict, *, mit: bool = False) -> str:
     controllers = [cfg["controllers"][name] for name in ("arm", "gripper")]
+    if mit:
+        controllers = [{
+            "name": cfg["moveit"]["mit_trajectory_controller"],
+            "joints": [joint for controller in controllers for joint in controller["joints"]],
+        }]
     simple = {"controller_names": [ctrl["name"] for ctrl in controllers]}
     for ctrl in controllers:
         simple[ctrl["name"]] = {
@@ -573,6 +578,7 @@ def render_all(cfg: dict) -> dict[Path, str]:
             render_hardware_dm(cfg),
         srdf: render_srdf(cfg, srdf),
         moveit / "moveit_controllers.yaml": render_moveit_controllers(cfg),
+        moveit / "moveit_mit_controllers.yaml": render_moveit_controllers(cfg, mit=True),
         moveit / "kinematics.yaml": GENERATED_NOTE + dump_yaml(cfg["moveit"]["kinematics"]),
         moveit / "ompl_planning.yaml": GENERATED_NOTE + dump_yaml(cfg["moveit"]["ompl_planning"]),
     }

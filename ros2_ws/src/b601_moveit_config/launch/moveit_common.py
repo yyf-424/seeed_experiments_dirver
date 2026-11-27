@@ -11,10 +11,12 @@
 import os
 
 from ament_index_python.packages import get_package_share_directory
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
 
 
-def build_moveit_configs(hardware: str = "mock"):
+def build_moveit_configs(hardware: str = "mock", mode: str = "pos_vel"):
     """按指定硬件后端装配 MoveIt 参数集。"""
     description_share = get_package_share_directory("b601_description")
 
@@ -24,6 +26,7 @@ def build_moveit_configs(hardware: str = "mock"):
             file_path=os.path.join(description_share, "urdf", "b601_dm.urdf.xacro"),
             mappings={
                 "hardware": hardware,
+                "dm_command_mode": mode,
                 "initial_positions_file": os.path.join(
                     description_share, "config", "initial_positions.yaml"
                 ),
@@ -36,10 +39,38 @@ def build_moveit_configs(hardware: str = "mock"):
         .robot_description_semantic(file_path="config/b601_dm.srdf")
         .robot_description_kinematics(file_path="config/kinematics.yaml")
         .joint_limits(file_path="config/joint_limits.yaml")
-        .trajectory_execution(file_path="config/moveit_controllers.yaml")
+        .trajectory_execution(file_path=("config/moveit_mit_controllers.yaml"
+                                         if mode == "mit_impedance" else "config/moveit_controllers.yaml"))
         .planning_pipelines(pipelines=["ompl"], default_planning_pipeline="ompl")
         .to_moveit_configs()
     )
+
+
+def trajectory_mode(context):
+    mode = LaunchConfiguration("trajectory_mode").perform(context)
+    if mode != "auto":
+        return mode
+    return "pos_vel" if LaunchConfiguration("hardware").perform(context) == "mock" else "mit_impedance"
+
+
+def launch_moveit(context):
+    hardware = LaunchConfiguration("hardware").perform(context)
+    use_sim_time = LaunchConfiguration("use_sim_time").perform(context) == "true"
+    mode = trajectory_mode(context)
+    moveit_config = build_moveit_configs(hardware, mode)
+    clock = {"use_sim_time": use_sim_time}
+    actions = [
+        Node(package="moveit_ros_move_group", executable="move_group", output="screen",
+             parameters=[moveit_config.to_dict(), clock]),
+    ]
+    if mode == "mit_impedance" and LaunchConfiguration("start_mit_trajectory").perform(context) == "true":
+        actions.insert(0, Node(package="b601_demos", executable="mit_trajectory", output="screen",
+                               parameters=[clock]))
+    if LaunchConfiguration("use_rviz").perform(context) == "true":
+        actions.append(Node(package="rviz2", executable="rviz2", output="log",
+                            arguments=["-d", moveit_rviz_config_file()],
+                            parameters=rviz_parameters(moveit_config, use_sim_time)))
+    return actions
 
 
 def moveit_rviz_config_file() -> str:

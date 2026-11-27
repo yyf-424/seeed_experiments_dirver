@@ -30,6 +30,7 @@ from sensor_msgs.msg import JointState
 
 from b601_demos.trajectory_utils import (
     GRIPPER_JOINT,
+    MIT_TRAJECTORY_CONTROLLER,
     make_trajectory,
     send_goal_with_retry,
     spin_until,
@@ -52,7 +53,7 @@ class Gripper(Node):
         # 与声明的 string 类型冲突（2026-11-21 实测：InvalidParameterType）。
         self.declare_parameter("preset", "open", ParameterDescriptor(dynamic_typing=True))
         self.declare_parameter("duration", SETTINGS["duration"])
-        self.declare_parameter("controller", "b601_gripper_controller")
+        self.declare_parameter("controller", MIT_TRAJECTORY_CONTROLLER)
 
         raw_preset = self.get_parameter("preset").value
         self.duration = float(self.get_parameter("duration").value)

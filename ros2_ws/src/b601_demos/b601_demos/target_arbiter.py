@@ -25,6 +25,7 @@ from .mit_target import feedforward_by_joint, make_mit_target
 from .trajectory_utils import RECENTER_COMPLETED, mit_recenter_bounds
 
 ARBITER = "/b601_target_arbiter"
+TRAJECTORY_SOURCE = "trajectory"
 
 
 @dataclass
@@ -100,6 +101,7 @@ class TargetArbiter(Node):
         self.create_service(SelectSource, "~/select_source", self.select_source)
         self.create_service(SetAuthority, "~/set_authority", self.set_authority)
         self.create_service(ReleaseSource, "~/release_source", self.release_source)
+        self.create_service(ReleaseSource, "~/cancel_source", self.cancel_source)
         self.create_service(ReleaseSource, "~/release_web_for_recenter", self.release_web_for_recenter)
         self.create_service(RevokeSource, "~/revoke_source", self.revoke_source)
         self.create_service(RenewSource, "~/renew_source", self.renew_source)
@@ -145,7 +147,10 @@ class TargetArbiter(Node):
         self.expire_sessions(monotonic_ns())
         source = request.source.strip() or None
         if self.session and source != self.session.source:
+            was_trajectory = self.session.source == TRAJECTORY_SOURCE
             self.session = None
+            if was_trajectory:
+                self.request_all_hold()
         self.authority = source
         response.accepted = True
         response.message = "authority designated" if source else "authority released"
@@ -164,6 +169,10 @@ class TargetArbiter(Node):
     def request_hold(self, controller):
         self.hold_revisions[controller] += 1
         self.publish_heartbeat(controller)
+
+    def request_all_hold(self):
+        for controller in self.routes:
+            self.request_hold(controller)
 
     def heartbeat(self):
         now = monotonic_ns()
@@ -215,8 +224,7 @@ class TargetArbiter(Node):
             return
         if self.session and self.session.expires_at <= now:
             session, self.session = self.session, None
-            for controller in self.routes:
-                self.request_hold(controller)
+            self.request_all_hold()
             self.event("expire", session.source, "source heartbeat timed out; hold requested")
 
     def release_source(self, request, response):
@@ -227,6 +235,19 @@ class TargetArbiter(Node):
             response.accepted = True
         response.message = "released" if response.accepted else "unknown or released session"
         self.event("release", session.source if response.accepted else "", response.message)
+        return response
+
+    def cancel_source(self, request, response):
+        self.expire_sessions(monotonic_ns())
+        session = self.session
+        if session is None or session.id != request.session_id:
+            response.message = "unknown or released session"
+            return response
+        self.session = None
+        self.request_all_hold()
+        response.accepted = True
+        response.message = "hold requested"
+        self.event("cancel", session.source, response.message)
         return response
 
     def release_web_for_recenter(self, request, response):
@@ -250,6 +271,8 @@ class TargetArbiter(Node):
             response.message = "no matching active session"
         else:
             self.session = None
+            if session.source == TRAJECTORY_SOURCE:
+                self.request_all_hold()
             response.accepted = True
             response.message = "revoked"
         self.event("revoke", session.source if response.accepted else "", response.message)
@@ -397,6 +420,7 @@ class TargetArbiter(Node):
             "source": self.session.source if self.session else None,
             "session": self.session.status_id if self.session else None,
             "holding_after_loss": any(self.holding.values()),
+            "holding_all": all(self.holding.get(name, False) for name in self.routes),
             "last_forwarded": self.dispatched,
             "last_applied_id": str(applied) if applied else None,
             "last_event": self.last_event,
